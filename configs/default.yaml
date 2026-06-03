@@ -1,0 +1,76 @@
+project:
+  name: "RT-HBTNet"
+  seed: 42
+  device: "auto"
+
+data:
+  image_size:
+    height: 64
+    width: 128
+  sequence_length: 64
+  grayscale: true
+  normalize: true
+  clahe:
+    enabled: true
+    clip_limit: 2.0
+    tile_grid_size: 8
+
+augmentation:
+  enabled: true
+  brightness: [0.2, 1.2]
+  gamma: [0.6, 1.8]
+  gaussian_noise_std: [0.0, 0.08]
+  motion_blur_prob: 0.5
+  motion_blur_kernel: [3, 15]
+  dust_prob: 0.3
+  contrast: [0.4, 1.0]
+  jpeg_prob: 0.2
+  jpeg_quality: [35, 95]
+
+roi:
+  mode: "fixed"
+  rois:
+    - [100, 100, 400, 160]
+  resize_width: 128
+  resize_height: 64
+
+model:
+  in_channels: 1
+  base_channels: 24
+  temporal_hidden: 64
+  dropout: 0.1
+  use_context: false
+
+fusion:
+  eps: 1.0e-6
+  min_confidence: 0.05
+
+stabilization:
+  type: "ema"
+  ema_alpha: 0.25
+  max_speed_delta: 0.5
+  kalman:
+    process_noise: 0.01
+    measurement_noise: 0.1
+
+training:
+  batch_size: 8
+  epochs: 20
+  lr: 0.001
+  weight_decay: 0.00001
+  num_workers: 2
+  loss:
+    main_weight: 1.0
+    tex_weight: 0.5
+    blur_weight: 0.5
+    conf_reg_weight: 0.01
+
+inference:
+  show_window: true
+  draw_roi: true
+  display_scale: 1.0
+  target_fps: 30
+
+benchmark:
+  warmup_iters: 20
+  test_iters: 100
