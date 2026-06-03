@@ -8,8 +8,8 @@ import numpy as np
 import torch
 from torch.utils.data import Dataset
 
-from utils.augmentations import apply_low_light_blur_augmentations
-from utils.preprocessing import preprocess_roi, stack_sequence
+from rt_hbtnet.utils.augmentations import apply_low_light_blur_augmentations
+from rt_hbtnet.utils.preprocessing import preprocess_roi, stack_sequence
 
 
 @dataclass(frozen=True)
@@ -44,8 +44,8 @@ class SyntheticSpeedDataset(Dataset):
     def __init__(
         self,
         config: dict[str, Any] | None = None,
-        num_samples: int = 2000,
-        speed_range_mps: Sequence[float] = (0.5, 5.0),
+        num_samples: int | None = None,
+        speed_range_mps: Sequence[float] | None = None,
         seed: int | None = None,
         apply_motion_blur: bool = True,
         sequence_length: int | None = None,
@@ -63,22 +63,26 @@ class SyntheticSpeedDataset(Dataset):
         )
         data_cfg = self.config.get("data", {})
         roi_cfg = self.config.get("roi", {})
+        synthetic_cfg = self.config.get("synthetic", {})
         image_cfg = data_cfg.get("image_size", {"height": 64, "width": 128})
 
         height = int(roi_cfg.get("resize_height", image_cfg["height"] if isinstance(image_cfg, dict) else image_cfg[0]))
         width = int(roi_cfg.get("resize_width", image_cfg["width"] if isinstance(image_cfg, dict) else image_cfg[1]))
         seq_len = int(sequence_length or sequence_len or data_cfg.get("sequence_length", 64))
         grayscale = bool(data_cfg.get("grayscale", True))
+        speed_range_cfg = speed_range_mps or synthetic_cfg.get("speed_range_mps", (0.5, 5.0))
 
         self.cfg = SyntheticConfig(
-            num_samples=int(num_samples),
+            num_samples=int(num_samples if num_samples is not None else synthetic_cfg.get("num_samples", 2000)),
             sequence_length=seq_len,
             height=height,
             width=width,
             grayscale=grayscale,
-            speed_range_mps=(float(speed_range_mps[0]), float(speed_range_mps[1])),
-            fps=float(fps or self.config.get("inference", {}).get("target_fps", 30.0)),
-            pixels_per_meter=float(pixels_per_meter or data_cfg.get("pixels_per_meter", 64.0)),
+            speed_range_mps=(float(speed_range_cfg[0]), float(speed_range_cfg[1])),
+            fps=float(fps or synthetic_cfg.get("fps") or self.config.get("inference", {}).get("target_fps", 30.0)),
+            pixels_per_meter=float(
+                pixels_per_meter or synthetic_cfg.get("pixels_per_meter") or data_cfg.get("pixels_per_meter", 64.0)
+            ),
             seed=int(seed if seed is not None else self.config.get("project", {}).get("seed", 42)),
         )
         if not apply_motion_blur:

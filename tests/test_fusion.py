@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import torch
 
-from models.fusion import ConfidenceAwareFusion
+from rt_hbtnet.models.fusion import ConfidenceAwareFusion
 
 
 def test_fusion_prefers_high_confidence_branch() -> None:

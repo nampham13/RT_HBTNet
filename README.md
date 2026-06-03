@@ -44,6 +44,12 @@ Synthetic training lets the full pipeline run without real conveyor data:
 python scripts/train.py --config configs/default.yaml --synthetic
 ```
 
+For a short smoke run on Windows or CPU-only machines:
+
+```bash
+python scripts/train.py --config configs/default.yaml --synthetic --synthetic-samples 64 --epochs 1 --batch-size 2 --num-workers 0 --save-dir runs/smoke_train
+```
+
 Checkpoints are saved to `runs/train` by default:
 
 - `best.pt`
@@ -53,13 +59,13 @@ Checkpoints are saved to `runs/train` by default:
 ## Run Inference
 
 ```bash
-python scripts/infer_video.py --config configs/default.yaml --weights runs/train/best.pt --video data/sample.mp4
+python scripts/infer_video.py --config configs/default.yaml --weights runs/train/best.pt --video data/synthetic_conveyor.mp4
 ```
 
 Optional fixed ROI override:
 
 ```bash
-python scripts/infer_video.py --config configs/default.yaml --weights runs/train/best.pt --video data/sample.mp4 --roi "100,100,400,160"
+python scripts/infer_video.py --config configs/default.yaml --weights runs/train/best.pt --video data/synthetic_conveyor.mp4 --roi "100,100,400,160"
 ```
 
 Use webcam input:
@@ -126,4 +132,3 @@ fixed after calibration.
 Lighting, exposure, rolling shutter, belt material, camera angle, and blur level
 can all shift model behavior. Real deployment requires site-specific data,
 calibration, and validation.
-"# RT_HBTNet" 

@@ -15,7 +15,7 @@ PARENT = ROOT.parent
 if str(PARENT) not in sys.path:
     sys.path.insert(0, str(PARENT))
 
-from models.rt_hbtnet import build_model_from_config, count_parameters  # noqa: E402
+from rt_hbtnet.models.rt_hbtnet import build_model_from_config, count_parameters  # noqa: E402
 
 
 def load_config(path: str | Path) -> dict[str, Any]:

@@ -14,7 +14,7 @@ PARENT = ROOT.parent
 if str(PARENT) not in sys.path:
     sys.path.insert(0, str(PARENT))
 
-from models.rt_hbtnet import build_model_from_config  # noqa: E402
+from rt_hbtnet.models.rt_hbtnet import build_model_from_config  # noqa: E402
 
 
 class SpeedOnlyWrapper(torch.nn.Module):

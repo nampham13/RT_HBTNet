@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import torch
 
-from models import RTHBTNet
+from rt_hbtnet.models import RTHBTNet
 
 
 def test_model_shapes_and_confidence_ranges() -> None:

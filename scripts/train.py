@@ -18,9 +18,9 @@ PARENT = ROOT.parent
 if str(PARENT) not in sys.path:
     sys.path.insert(0, str(PARENT))
 
-from datasets import SyntheticSpeedDataset, VideoSpeedDataset  # noqa: E402
-from models.rt_hbtnet import build_model_from_config, count_parameters  # noqa: E402
-from utils.metrics import mae, mape, rmse  # noqa: E402
+from rt_hbtnet.datasets import SyntheticSpeedDataset, VideoSpeedDataset  # noqa: E402
+from rt_hbtnet.models.rt_hbtnet import build_model_from_config, count_parameters  # noqa: E402
+from rt_hbtnet.utils.metrics import mae, mape, rmse  # noqa: E402
 
 
 def load_config(path: str | Path) -> dict[str, Any]:
@@ -196,6 +196,8 @@ def main() -> None:
     parser.add_argument("--video-root", default="data/videos")
     parser.add_argument("--epochs", type=int, default=None)
     parser.add_argument("--batch-size", type=int, default=None)
+    parser.add_argument("--num-workers", type=int, default=None)
+    parser.add_argument("--synthetic-samples", type=int, default=None)
     parser.add_argument("--save-dir", default="runs/train")
     args = parser.parse_args()
 
@@ -208,6 +210,10 @@ def main() -> None:
         train_cfg["epochs"] = int(args.epochs)
     if args.batch_size is not None:
         train_cfg["batch_size"] = int(args.batch_size)
+    if args.num_workers is not None:
+        train_cfg["num_workers"] = int(args.num_workers)
+    if args.synthetic_samples is not None:
+        config.setdefault("synthetic", {})["num_samples"] = int(args.synthetic_samples)
 
     seed = int(config.get("project", {}).get("seed", 42))
     set_seed(seed)

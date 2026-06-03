@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from utils.filters import EMAFilter, SimpleKalmanFilter1D
+from rt_hbtnet.utils.filters import EMAFilter, SimpleKalmanFilter1D
 
 
 def test_ema_first_update() -> None:

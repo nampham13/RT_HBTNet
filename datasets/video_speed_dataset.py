@@ -9,8 +9,8 @@ import numpy as np
 import torch
 from torch.utils.data import Dataset
 
-from utils.preprocessing import preprocess_roi, stack_sequence
-from utils.roi import extract_rois
+from rt_hbtnet.utils.preprocessing import preprocess_roi, stack_sequence
+from rt_hbtnet.utils.roi import extract_rois
 
 
 def _default_config(sequence_length: int = 64) -> dict[str, Any]:
