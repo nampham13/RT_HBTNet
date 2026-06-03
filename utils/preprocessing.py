@@ -6,7 +6,7 @@ from typing import Any, Sequence
 import cv2
 import numpy as np
 
-from rt_hbtnet.utils.roi import ROI, crop_roi, resize_roi
+from utils.roi import ROI, crop_roi, resize_roi
 
 
 def _data_config(config: dict[str, Any]) -> dict[str, Any]:
