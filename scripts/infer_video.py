@@ -16,12 +16,12 @@ try:
 except ImportError:
     from _bootstrap import ROOT
 
-from rt_hbtnet.models.rt_hbtnet import build_model_from_config
-from rt_hbtnet.utils.filters import SpeedStabilizer
-from rt_hbtnet.utils.preprocessing import preprocess_roi
-from rt_hbtnet.utils.roi import extract_rois
-from rt_hbtnet.utils.speed_calibration import SpeedCalibrator, robust_roi_fusion
-from rt_hbtnet.utils.visualization import draw_rois, make_dashboard_frame
+from models.rt_hbtnet import build_model_from_config
+from utils.filters import SpeedStabilizer
+from utils.preprocessing import preprocess_roi
+from utils.roi import extract_rois
+from utils.speed_calibration import SpeedCalibrator, robust_roi_fusion
+from utils.visualization import draw_rois, make_dashboard_frame
 
 
 def load_config(path: str | Path) -> dict[str, Any]:

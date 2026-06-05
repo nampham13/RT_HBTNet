@@ -14,7 +14,7 @@ try:
 except ImportError:
     from _bootstrap import ROOT
 
-from rt_hbtnet.models.rt_hbtnet import build_model_from_config, count_parameters
+from models.rt_hbtnet import build_model_from_config, count_parameters
 
 
 def load_config(path: str | Path) -> dict[str, Any]:

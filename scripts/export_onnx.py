@@ -13,7 +13,7 @@ try:
 except ImportError:
     from _bootstrap import ROOT
 
-from rt_hbtnet.models.rt_hbtnet import build_model_from_config
+from models.rt_hbtnet import build_model_from_config
 
 
 class SpeedOnlyWrapper(torch.nn.Module):

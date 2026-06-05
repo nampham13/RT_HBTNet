@@ -17,9 +17,9 @@ try:
 except ImportError:
     from _bootstrap import ROOT
 
-from rt_hbtnet.datasets import SyntheticSpeedDataset, VideoSpeedDataset
-from rt_hbtnet.models.rt_hbtnet import build_model_from_config, count_parameters
-from rt_hbtnet.utils.metrics import mae, mape, rmse
+from datasets import SyntheticSpeedDataset, VideoSpeedDataset
+from models.rt_hbtnet import build_model_from_config, count_parameters
+from utils.metrics import mae, mape, rmse
 
 
 def load_config(path: str | Path) -> dict[str, Any]:

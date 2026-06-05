@@ -8,8 +8,8 @@ import numpy as np
 import torch
 from torch.utils.data import Dataset
 
-from rt_hbtnet.utils.augmentations import apply_low_light_blur_augmentations
-from rt_hbtnet.utils.preprocessing import preprocess_roi, stack_sequence
+from utils.augmentations import apply_low_light_blur_augmentations
+from utils.preprocessing import preprocess_roi, stack_sequence
 
 
 @dataclass(frozen=True)
