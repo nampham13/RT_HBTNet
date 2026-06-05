@@ -35,6 +35,9 @@ roi:
   resize_height: 64
 
 model:
+  encoder: "mobilenetv3_small"
+  encoder_truncate_at: 4
+  encoder_include_edges: true
   in_channels: 1
   base_channels: 24
   temporal_hidden: 64

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import torch
 from torch import nn
+from torchvision.models import mobilenet_v3_small
 
 
 def _resolve_channels(
@@ -140,6 +141,73 @@ class SmallFrameEncoder(nn.Module):
         pooled = self.backbone(x)
         # pooled: B,2*base_channels -> features: B,D
         return self.proj(pooled)
+
+
+def _last_conv_out_channels(module: nn.Module) -> int:
+    """Return the output channels of the last Conv2d inside a module."""
+
+    out_channels: int | None = None
+    for layer in module.modules():
+        if isinstance(layer, nn.Conv2d):
+            out_channels = int(layer.out_channels)
+    if out_channels is None:
+        raise ValueError("module does not contain a Conv2d layer")
+    return out_channels
+
+
+class MobileNetV3SmallFrameEncoder(nn.Module):
+    """Truncated MobileNetV3-Small frame encoder for small conveyor ROIs.
+
+    The default truncation keeps MobileNetV3-Small features up to total stride
+    8. For a 64x128 ROI this leaves an 8x16 feature map before pooling, which
+    preserves more low-level texture and blur detail than a full classifier
+    backbone.
+    """
+
+    def __init__(
+        self,
+        in_ch: int = 1,
+        feature_dim: int = 64,
+        truncate_at: int = 4,
+    ) -> None:
+        super().__init__()
+        if truncate_at < 1:
+            raise ValueError("truncate_at must keep at least one MobileNetV3 feature block")
+
+        backbone = mobilenet_v3_small(weights=None)
+        if truncate_at > len(backbone.features):
+            raise ValueError(f"truncate_at={truncate_at} exceeds MobileNetV3 feature count {len(backbone.features)}")
+
+        self.features = nn.Sequential(*list(backbone.features.children())[: int(truncate_at)])
+        first_conv = self.features[0][0]
+        if not isinstance(first_conv, nn.Conv2d):
+            raise TypeError("unexpected MobileNetV3 first block layout")
+        if int(in_ch) != int(first_conv.in_channels):
+            self.features[0][0] = nn.Conv2d(
+                int(in_ch),
+                int(first_conv.out_channels),
+                kernel_size=first_conv.kernel_size,
+                stride=first_conv.stride,
+                padding=first_conv.padding,
+                dilation=first_conv.dilation,
+                groups=1,
+                bias=False,
+                padding_mode=first_conv.padding_mode,
+            )
+
+        out_channels = _last_conv_out_channels(self.features)
+        self.proj = nn.Sequential(
+            nn.Conv2d(out_channels, int(feature_dim), kernel_size=1, bias=False),
+            nn.BatchNorm2d(int(feature_dim)),
+            nn.Hardswish(inplace=True),
+            nn.AdaptiveAvgPool2d(1),
+            nn.Flatten(),
+        )
+        init_lightweight(self.proj)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        # x: B,C,H,W -> features: B,D
+        return self.proj(self.features(x))
 
 
 class TemporalConvBlock(nn.Module):

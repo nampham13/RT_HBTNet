@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import argparse
-import sys
 import time
 from collections import deque
 from pathlib import Path
@@ -12,17 +11,17 @@ import numpy as np
 import torch
 import yaml
 
-ROOT = Path(__file__).resolve().parents[1]
-PARENT = ROOT.parent
-if str(PARENT) not in sys.path:
-    sys.path.insert(0, str(PARENT))
+try:
+    from ._bootstrap import ROOT
+except ImportError:
+    from _bootstrap import ROOT
 
-from rt_hbtnet.models.rt_hbtnet import build_model_from_config  # noqa: E402
-from rt_hbtnet.utils.filters import SpeedStabilizer  # noqa: E402
-from rt_hbtnet.utils.preprocessing import preprocess_roi  # noqa: E402
-from rt_hbtnet.utils.roi import extract_rois  # noqa: E402
-from rt_hbtnet.utils.speed_calibration import SpeedCalibrator, robust_roi_fusion  # noqa: E402
-from rt_hbtnet.utils.visualization import draw_rois, make_dashboard_frame  # noqa: E402
+from rt_hbtnet.models.rt_hbtnet import build_model_from_config
+from rt_hbtnet.utils.filters import SpeedStabilizer
+from rt_hbtnet.utils.preprocessing import preprocess_roi
+from rt_hbtnet.utils.roi import extract_rois
+from rt_hbtnet.utils.speed_calibration import SpeedCalibrator, robust_roi_fusion
+from rt_hbtnet.utils.visualization import draw_rois, make_dashboard_frame
 
 
 def load_config(path: str | Path) -> dict[str, Any]:

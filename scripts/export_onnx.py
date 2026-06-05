@@ -2,19 +2,18 @@ from __future__ import annotations
 
 import argparse
 import importlib.util
-import sys
 from pathlib import Path
 from typing import Any
 
 import torch
 import yaml
 
-ROOT = Path(__file__).resolve().parents[1]
-PARENT = ROOT.parent
-if str(PARENT) not in sys.path:
-    sys.path.insert(0, str(PARENT))
+try:
+    from ._bootstrap import ROOT
+except ImportError:
+    from _bootstrap import ROOT
 
-from rt_hbtnet.models.rt_hbtnet import build_model_from_config  # noqa: E402
+from rt_hbtnet.models.rt_hbtnet import build_model_from_config
 
 
 class SpeedOnlyWrapper(torch.nn.Module):
