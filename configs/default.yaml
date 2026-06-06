@@ -42,7 +42,8 @@ model:
   base_channels: 24
   temporal_hidden: 64
   dropout: 0.1
-  use_context: false
+  use_context: true
+  context_hidden: 64
 
 fusion:
   eps: 1.0e-6

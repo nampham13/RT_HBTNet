@@ -16,8 +16,11 @@ RT-HBTNet combines two lightweight visual branches:
 - Blur Physics Branch learns speed from motion-blur-induced visual signatures in
   a key ROI frame. This is a learned latent cue, not an explicit blur-length
   measurement.
+- Context Encoder estimates observation quality and branch reliability context.
+  It does not estimate speed; it helps fusion decide whether the Temporal
+  Texture Branch or Blur Physics Branch should be trusted more.
 - Confidence-aware fusion combines the texture and blur predictions using their
-  predicted confidences.
+  predicted confidences plus the context branch-bias signal.
 - EMA or Kalman stabilization smooths the final speed estimate for display.
 
 Input tensors use shape `B,T,C,H,W`.

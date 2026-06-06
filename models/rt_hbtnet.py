@@ -8,6 +8,7 @@ from torch.nn import functional as F
 
 from .blur_physics_branch import BlurPhysicsBranch
 from .blocks import MLPHead, MobileNetV3SmallFrameEncoder, TemporalConvBlock, init_lightweight
+from .context_encoder import ObservationContextEncoder
 from .fusion import ConfidenceAwareFusion
 from .temporal_texture_branch import TemporalTextureBranch
 
@@ -77,7 +78,8 @@ class RTHBTNet(nn.Module):
 
     Output:
         A dictionary containing fused speed/confidence and branch diagnostics.
-        All speed and confidence tensors use shape ``B,1``.
+        All speed, confidence, context-quality, and context-bias diagnostics use
+        batch-aligned shapes. Scalar outputs use ``B,1``.
     """
 
     def __init__(
@@ -86,7 +88,8 @@ class RTHBTNet(nn.Module):
         base_channels: int = 24,
         temporal_hidden: int = 64,
         dropout: float = 0.1,
-        use_context: bool = False,
+        use_context: bool = True,
+        context_hidden: int | None = None,
         encoder: str = "mobilenetv3_small",
         encoder_truncate_at: int = 4,
         encoder_include_edges: bool = True,
@@ -94,7 +97,7 @@ class RTHBTNet(nn.Module):
         min_confidence: float = 0.0,
     ) -> None:
         super().__init__()
-        del use_context  # Reserved for future context inputs.
+        self.use_context = bool(use_context)
         self.in_channels = int(in_channels)
         self.encoder_type = str(encoder).lower()
         self.encoder_include_edges = bool(encoder_include_edges)
@@ -135,6 +138,16 @@ class RTHBTNet(nn.Module):
         else:
             raise ValueError(f"Unsupported encoder type: {encoder}")
 
+        self.context_encoder = (
+            ObservationContextEncoder(
+                feature_dim=int(temporal_hidden),
+                hidden_dim=context_hidden,
+                dropout=float(dropout),
+            )
+            if self.use_context
+            else None
+        )
+
         sobel_x = torch.tensor(
             [[-1.0, 0.0, 1.0], [-2.0, 0.0, 2.0], [-1.0, 0.0, 1.0]],
             dtype=torch.float32,
@@ -159,6 +172,10 @@ class RTHBTNet(nn.Module):
             texture = self.texture_branch(x_seq)  # full sequence: B,T,C,H,W
             x_key = x_seq[:, -1]  # last frame: B,C,H,W
             blur = self.blur_branch(x_key)
+            context = self._encode_context(
+                texture_features=texture["texture_features"],
+                blur_features=blur["blur_features"],
+            )
         else:
             if self.frame_encoder is None or self.texture_head is None or self.blur_head is None:
                 raise RuntimeError("shared encoder heads are not initialized")
@@ -168,15 +185,18 @@ class RTHBTNet(nn.Module):
             frame_features = self.frame_encoder(descriptor).reshape(b, t, -1)  # B,T,D
             texture = self.texture_head(frame_features)
             blur = self.blur_head(frame_features[:, -1])
+            context = self._encode_context(frame_features=frame_features)
 
         fused = self.fusion(
             speed_tex=texture["speed_tex"],  # B,1
             conf_tex=texture["conf_tex"],  # B,1
             speed_blur=blur["speed_blur"],  # B,1
             conf_blur=blur["conf_blur"],  # B,1
+            context_bias=None if context is None else context["context_bias"],  # B,2
+            obs_quality=None if context is None else context["obs_quality"],  # B,1
         )
 
-        return {
+        out = {
             "speed": fused["speed"],  # B,1
             "conf_final": fused["conf_final"],  # B,1
             "speed_tex": texture["speed_tex"],  # B,1
@@ -186,6 +206,30 @@ class RTHBTNet(nn.Module):
             "w_tex": fused["w_tex"],  # B,1
             "w_blur": fused["w_blur"],  # B,1
         }
+        if context is not None:
+            out.update(
+                {
+                    "obs_quality": context["obs_quality"],  # B,1
+                    "context_bias_tex": context["context_bias_tex"],  # B,1
+                    "context_bias_blur": context["context_bias_blur"],  # B,1
+                }
+            )
+        return out
+
+    def _encode_context(
+        self,
+        frame_features: torch.Tensor | None = None,
+        *,
+        texture_features: torch.Tensor | None = None,
+        blur_features: torch.Tensor | None = None,
+    ) -> dict[str, torch.Tensor] | None:
+        if self.context_encoder is None:
+            return None
+        return self.context_encoder(
+            frame_features=frame_features,
+            texture_features=texture_features,
+            blur_features=blur_features,
+        )
 
     def _make_frame_descriptor(self, x_frame: torch.Tensor) -> torch.Tensor:
         if not self.encoder_include_edges:
@@ -213,7 +257,8 @@ def build_model_from_config(config: dict[str, Any]) -> RTHBTNet:
         base_channels=int(model_cfg.get("base_channels", 24)),
         temporal_hidden=int(model_cfg.get("temporal_hidden", model_cfg.get("feature_dim", 64))),
         dropout=float(model_cfg.get("dropout", 0.1)),
-        use_context=bool(model_cfg.get("use_context", False)),
+        use_context=bool(model_cfg.get("use_context", True)),
+        context_hidden=None if model_cfg.get("context_hidden") is None else int(model_cfg.get("context_hidden")),
         encoder=str(model_cfg.get("encoder", "mobilenetv3_small")),
         encoder_truncate_at=int(model_cfg.get("encoder_truncate_at", 4)),
         encoder_include_edges=bool(model_cfg.get("encoder_include_edges", True)),

@@ -114,6 +114,11 @@ def compute_loss(
         tex_conf_target = torch.exp(-torch.abs(pred["speed_tex"] - gt)).detach()
         blur_conf_target = torch.exp(-torch.abs(pred["speed_blur"] - gt)).detach()
         conf_reg = l1(pred["conf_tex"], tex_conf_target) + l1(pred["conf_blur"], blur_conf_target)
+        if "obs_quality" in pred:
+            # Context quality is high when at least one visual branch has a
+            # reliable observation; it is not supervised as a speed estimate.
+            quality_target = torch.maximum(tex_conf_target, blur_conf_target)
+            conf_reg = conf_reg + l1(pred["obs_quality"], quality_target)
         total = total + conf_reg_weight * conf_reg
 
     return total, {
