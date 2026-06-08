@@ -4,15 +4,15 @@ import torch
 from torch import nn
 from torch.nn import functional as F
 
-from .blocks import MLPHead, SmallFrameEncoder, TemporalConvBlock, init_lightweight
+from .blocks import Conv2Plus1DBlock, MLPHead, MultiScaleTemporalPool, init_lightweight
 
 
 class TemporalTextureBranch(nn.Module):
     """Temporal texture branch for ROI clip dynamics.
 
     The branch learns motion-sensitive texture changes over time without
-    running explicit optical flow. Sequence length is flexible because the
-    temporal dimension is processed by Conv1d blocks and averaged at the end.
+    running explicit optical flow. It keeps spatial feature maps through the
+    temporal stack so local texture motion can be modeled before pooling.
     """
 
     def __init__(
@@ -23,23 +23,50 @@ class TemporalTextureBranch(nn.Module):
         dropout: float = 0.1,
         num_temporal_blocks: int = 3,
         feature_dim: int | None = None,
+        pool_scales: tuple[int, ...] = (1, 2, 4),
+        use_tsm: bool = True,
     ) -> None:
         super().__init__()
         feat_dim = int(feature_dim or temporal_hidden)
-        self.frame_encoder = SmallFrameEncoder(
-            in_ch=int(in_channels),
-            feature_dim=feat_dim,
-            base_channels=int(base_channels),
+        stem_channels = int(base_channels)
+        self.in_channels = int(in_channels)
+        self.stem = nn.Sequential(
+            nn.Conv3d(
+                self.in_channels,
+                stem_channels,
+                kernel_size=(1, 3, 3),
+                stride=(1, 2, 2),
+                padding=(0, 1, 1),
+                bias=False,
+            ),
+            nn.BatchNorm3d(stem_channels),
+            nn.SiLU(inplace=True),
+            nn.Conv3d(
+                stem_channels,
+                feat_dim,
+                kernel_size=(1, 3, 3),
+                stride=(1, 2, 2),
+                padding=(0, 1, 1),
+                bias=False,
+            ),
+            nn.BatchNorm3d(feat_dim),
+            nn.SiLU(inplace=True),
         )
         self.temporal = nn.Sequential(
             *[
-                TemporalConvBlock(
+                Conv2Plus1DBlock(
                     channels=feat_dim,
-                    kernel_size=3,
                     dropout=float(dropout),
+                    use_tsm=bool(use_tsm),
                 )
                 for _ in range(int(num_temporal_blocks))
             ]
+        )
+        self.pool = MultiScaleTemporalPool(
+            channels=feat_dim,
+            output_dim=feat_dim,
+            scales=tuple(pool_scales),
+            dropout=float(dropout),
         )
         self.speed_head = MLPHead(feat_dim, out_dim=1, hidden_dim=feat_dim, dropout=float(dropout))
         self.conf_head = MLPHead(feat_dim, out_dim=1, hidden_dim=feat_dim, dropout=float(dropout))
@@ -58,14 +85,13 @@ class TemporalTextureBranch(nn.Module):
 
         if x_seq.ndim != 5:
             raise ValueError("x_seq must have shape B,T,C,H,W")
+        if x_seq.shape[2] != self.in_channels:
+            raise ValueError(f"expected {self.in_channels} channels, got {x_seq.shape[2]}")
 
-        b, t, c, h, w = x_seq.shape
-        x = x_seq.reshape(b * t, c, h, w)  # B*T,C,H,W
-        frame_feat = self.frame_encoder(x)  # B*T,D
-        frame_feat = frame_feat.reshape(b, t, -1)  # B,T,D
-        temporal_feat = frame_feat.transpose(1, 2)  # B,D,T
-        temporal_feat = self.temporal(temporal_feat)  # B,D,T
-        feat = temporal_feat.mean(dim=-1)  # B,D
+        x = x_seq.permute(0, 2, 1, 3, 4).contiguous()  # B,C,T,H,W
+        texture_maps = self.stem(x)  # B,D,T,H',W'
+        texture_maps = self.temporal(texture_maps)  # B,D,T,H',W'
+        feat = self.pool(texture_maps)  # B,D
 
         speed_tex = F.softplus(self.speed_head(feat))  # B,1 non-negative
         conf_logit = self.conf_head(feat)  # B,1

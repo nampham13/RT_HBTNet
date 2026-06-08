@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import torch
 from torch import nn
+from torch.nn import functional as F
 from torchvision.models import mobilenet_v3_small
 
 
@@ -143,6 +144,132 @@ class SmallFrameEncoder(nn.Module):
         return self.proj(pooled)
 
 
+class TemporalShift(nn.Module):
+    """Shift feature channels across time without parameters or FLOPs.
+
+    Input and output use video feature layout ``B,C,T,H,W``. A small channel
+    fold is shifted one step backward and another fold one step forward, while
+    the remaining channels stay aligned with the current frame.
+    """
+
+    def __init__(self, fold_div: int = 8) -> None:
+        super().__init__()
+        if int(fold_div) <= 0:
+            raise ValueError("fold_div must be positive")
+        self.fold_div = int(fold_div)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        if x.ndim != 5:
+            raise ValueError("x must have shape B,C,T,H,W")
+
+        _, channels, timesteps, _, _ = x.shape
+        fold = channels // self.fold_div
+        if fold == 0 or timesteps <= 1:
+            return x
+
+        out = torch.zeros_like(x)
+        out[:, :fold, :-1] = x[:, :fold, 1:]
+        out[:, fold : 2 * fold, 1:] = x[:, fold : 2 * fold, :-1]
+        out[:, 2 * fold :] = x[:, 2 * fold :]
+        return out
+
+
+class Conv2Plus1DBlock(nn.Module):
+    """Residual separable ``(2+1)D`` convolution block for video features.
+
+    The block applies a spatial ``1xKxK`` convolution followed by a temporal
+    ``Kt x 1 x 1`` convolution. Depthwise spatial/temporal filters plus
+    pointwise mixing keep the block compact enough for real-time ROI clips.
+    """
+
+    def __init__(
+        self,
+        channels: int,
+        spatial_kernel_size: int = 3,
+        temporal_kernel_size: int = 3,
+        dropout: float = 0.1,
+        activation: str = "silu",
+        use_tsm: bool = True,
+        tsm_fold_div: int = 8,
+    ) -> None:
+        super().__init__()
+        channels = int(channels)
+        spatial_padding = spatial_kernel_size // 2
+        temporal_padding = temporal_kernel_size // 2
+        self.shift = TemporalShift(tsm_fold_div) if use_tsm else nn.Identity()
+        self.net = nn.Sequential(
+            nn.Conv3d(
+                channels,
+                channels,
+                kernel_size=(1, spatial_kernel_size, spatial_kernel_size),
+                padding=(0, spatial_padding, spatial_padding),
+                groups=channels,
+                bias=False,
+            ),
+            nn.Conv3d(channels, channels, kernel_size=1, bias=False),
+            nn.BatchNorm3d(channels),
+            _activation(activation),
+            nn.Dropout3d(float(dropout)),
+            nn.Conv3d(
+                channels,
+                channels,
+                kernel_size=(temporal_kernel_size, 1, 1),
+                padding=(temporal_padding, 0, 0),
+                groups=channels,
+                bias=False,
+            ),
+            nn.Conv3d(channels, channels, kernel_size=1, bias=False),
+            nn.BatchNorm3d(channels),
+            nn.Dropout3d(float(dropout)),
+        )
+        self.out_act = _activation(activation)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        if x.ndim != 5:
+            raise ValueError("x must have shape B,C,T,H,W")
+        shifted = self.shift(x)
+        return self.out_act(x + self.net(shifted))
+
+
+class MultiScaleTemporalPool(nn.Module):
+    """Pool video features over time and multiple spatial ROI scales."""
+
+    def __init__(
+        self,
+        channels: int,
+        output_dim: int | None = None,
+        scales: tuple[int, ...] = (1, 2, 4),
+        dropout: float = 0.1,
+        activation: str = "silu",
+    ) -> None:
+        super().__init__()
+        if not scales:
+            raise ValueError("at least one pooling scale is required")
+        self.scales = tuple(int(scale) for scale in scales)
+        if any(scale <= 0 for scale in self.scales):
+            raise ValueError("pooling scales must be positive")
+
+        channels = int(channels)
+        output_dim = int(output_dim or channels)
+        pooled_dim = channels * sum(scale * scale for scale in self.scales)
+        self.proj = nn.Sequential(
+            nn.Linear(pooled_dim, output_dim),
+            nn.LayerNorm(output_dim),
+            _activation(activation),
+            nn.Dropout(float(dropout)),
+        )
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        if x.ndim != 5:
+            raise ValueError("x must have shape B,C,T,H,W")
+
+        pooled = [
+            F.adaptive_avg_pool3d(x, output_size=(1, scale, scale)).flatten(1)
+            for scale in self.scales
+        ]
+        return self.proj(torch.cat(pooled, dim=1))
+
+
 def _last_conv_out_channels(module: nn.Module) -> int:
     """Return the output channels of the last Conv2d inside a module."""
 
@@ -200,14 +327,21 @@ class MobileNetV3SmallFrameEncoder(nn.Module):
             nn.Conv2d(out_channels, int(feature_dim), kernel_size=1, bias=False),
             nn.BatchNorm2d(int(feature_dim)),
             nn.Hardswish(inplace=True),
-            nn.AdaptiveAvgPool2d(1),
-            nn.Flatten(),
         )
+        self.pool = nn.Sequential(nn.AdaptiveAvgPool2d(1), nn.Flatten())
         init_lightweight(self.proj)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         # x: B,C,H,W -> features: B,D
+        return self.pool(self.forward_features(x))
+
+    def forward_features(self, x: torch.Tensor) -> torch.Tensor:
+        # x: B,C,H,W -> feature maps: B,D,H',W'
         return self.proj(self.features(x))
+
+    def pool_features(self, x: torch.Tensor) -> torch.Tensor:
+        # x: B,D,H',W' -> pooled features: B,D
+        return self.pool(x)
 
 
 class TemporalConvBlock(nn.Module):
@@ -275,7 +409,7 @@ def init_lightweight(module: nn.Module) -> None:
     """Kaiming init for Conv/Linear layers used in the lightweight blocks."""
 
     for layer in module.modules():
-        if isinstance(layer, (nn.Conv2d, nn.Conv1d, nn.Linear)):
+        if isinstance(layer, (nn.Conv2d, nn.Conv1d, nn.Conv3d, nn.Linear)):
             nn.init.kaiming_normal_(layer.weight, nonlinearity="relu")
             if layer.bias is not None:
                 nn.init.zeros_(layer.bias)

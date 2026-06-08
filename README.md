@@ -12,7 +12,9 @@ as the main method.
 RT-HBTNet combines two lightweight visual branches:
 
 - Temporal Texture Branch learns speed from temporal texture dynamics across a
-  sequence of conveyor ROI frames.
+  sequence of conveyor ROI frames. It uses lightweight Temporal Shift Modules,
+  decomposed `(2+1)D` convolutions, and multi-scale ROI pooling so local texture
+  motion remains visible across changes in apparent belt scale.
 - Blur Physics Branch learns speed from motion-blur-induced visual signatures in
   a key ROI frame. This is a learned latent cue, not an explicit blur-length
   measurement.

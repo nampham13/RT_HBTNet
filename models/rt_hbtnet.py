@@ -7,44 +7,68 @@ from torch import nn
 from torch.nn import functional as F
 
 from .blur_physics_branch import BlurPhysicsBranch
-from .blocks import MLPHead, MobileNetV3SmallFrameEncoder, TemporalConvBlock, init_lightweight
+from .blocks import (
+    Conv2Plus1DBlock,
+    MLPHead,
+    MobileNetV3SmallFrameEncoder,
+    MultiScaleTemporalPool,
+    init_lightweight,
+)
 from .context_encoder import ObservationContextEncoder
 from .fusion import ConfidenceAwareFusion
 from .temporal_texture_branch import TemporalTextureBranch
 
 
 class TemporalTextureHead(nn.Module):
-    """Temporal speed head operating on shared per-frame features."""
+    """Temporal speed head operating on shared per-frame feature maps."""
 
-    def __init__(self, feature_dim: int = 64, dropout: float = 0.1, num_temporal_blocks: int = 3) -> None:
+    def __init__(
+        self,
+        feature_dim: int = 64,
+        dropout: float = 0.1,
+        num_temporal_blocks: int = 3,
+        pool_scales: tuple[int, ...] = (1, 2, 4),
+        use_tsm: bool = True,
+    ) -> None:
         super().__init__()
         self.temporal = nn.Sequential(
             *[
-                TemporalConvBlock(
+                Conv2Plus1DBlock(
                     channels=int(feature_dim),
-                    kernel_size=3,
                     dropout=float(dropout),
+                    use_tsm=bool(use_tsm),
                 )
                 for _ in range(int(num_temporal_blocks))
             ]
+        )
+        self.pool = MultiScaleTemporalPool(
+            channels=int(feature_dim),
+            output_dim=int(feature_dim),
+            scales=tuple(pool_scales),
+            dropout=float(dropout),
         )
         self.speed_head = MLPHead(feature_dim, out_dim=1, hidden_dim=feature_dim, dropout=float(dropout))
         self.conf_head = MLPHead(feature_dim, out_dim=1, hidden_dim=feature_dim, dropout=float(dropout))
         init_lightweight(self)
 
     def forward(self, frame_features: torch.Tensor) -> dict[str, torch.Tensor]:
-        if frame_features.ndim != 3:
-            raise ValueError("frame_features must have shape B,T,D")
+        if frame_features.ndim == 3:
+            temporal_maps = frame_features.transpose(1, 2).unsqueeze(-1).unsqueeze(-1)  # B,D,T,1,1
+        elif frame_features.ndim == 5:
+            temporal_maps = frame_features.permute(0, 2, 1, 3, 4).contiguous()  # B,D,T,H,W
+        else:
+            raise ValueError("frame_features must have shape B,T,D or B,T,D,H,W")
 
-        temporal_feat = frame_features.transpose(1, 2)  # B,D,T
-        temporal_feat = self.temporal(temporal_feat)  # B,D,T
-        feat = temporal_feat.mean(dim=-1)  # B,D
+        temporal_maps = self.temporal(temporal_maps)  # B,D,T,H,W
+        feat = self.pool(temporal_maps)  # B,D
         speed_tex = F.softplus(self.speed_head(feat))
-        conf_tex = torch.sigmoid(self.conf_head(feat))
+        conf_logit = self.conf_head(feat)
+        conf_tex = torch.sigmoid(conf_logit)
         return {
             "speed_tex": speed_tex,
             "conf_tex": conf_tex,
             "texture_features": feat,
+            "confidence_logit": conf_logit.squeeze(-1),
         }
 
 
@@ -93,6 +117,9 @@ class RTHBTNet(nn.Module):
         encoder: str = "mobilenetv3_small",
         encoder_truncate_at: int = 4,
         encoder_include_edges: bool = True,
+        texture_num_blocks: int = 3,
+        texture_pool_scales: tuple[int, ...] = (1, 2, 4),
+        texture_use_tsm: bool = True,
         fusion_eps: float = 1.0e-6,
         min_confidence: float = 0.0,
     ) -> None:
@@ -108,6 +135,9 @@ class RTHBTNet(nn.Module):
                 base_channels=int(base_channels),
                 temporal_hidden=int(temporal_hidden),
                 dropout=float(dropout),
+                num_temporal_blocks=int(texture_num_blocks),
+                pool_scales=tuple(texture_pool_scales),
+                use_tsm=bool(texture_use_tsm),
             )
             self.blur_branch = BlurPhysicsBranch(
                 in_channels=self.in_channels,
@@ -128,6 +158,9 @@ class RTHBTNet(nn.Module):
             self.texture_head = TemporalTextureHead(
                 feature_dim=int(temporal_hidden),
                 dropout=float(dropout),
+                num_temporal_blocks=int(texture_num_blocks),
+                pool_scales=tuple(texture_pool_scales),
+                use_tsm=bool(texture_use_tsm),
             )
             self.blur_head = BlurFeatureHead(
                 feature_dim=int(temporal_hidden),
@@ -182,8 +215,12 @@ class RTHBTNet(nn.Module):
             b, t, c, h, w = x_seq.shape
             x_flat = x_seq.reshape(b * t, c, h, w)
             descriptor = self._make_frame_descriptor(x_flat)
-            frame_features = self.frame_encoder(descriptor).reshape(b, t, -1)  # B,T,D
-            texture = self.texture_head(frame_features)
+            feature_maps_flat = self.frame_encoder.forward_features(descriptor)  # B*T,D,H',W'
+            _, d, feat_h, feat_w = feature_maps_flat.shape
+            frame_maps = feature_maps_flat.reshape(b, t, d, feat_h, feat_w)  # B,T,D,H',W'
+            frame_features = self.frame_encoder.pool_features(feature_maps_flat)
+            frame_features = frame_features.reshape(b, t, -1)  # B,T,D
+            texture = self.texture_head(frame_maps)
             blur = self.blur_head(frame_features[:, -1])
             context = self._encode_context(frame_features=frame_features)
 
@@ -252,6 +289,9 @@ def build_model_from_config(config: dict[str, Any]) -> RTHBTNet:
 
     model_cfg = config.get("model", {})
     fusion_cfg = config.get("fusion", {})
+    texture_pool_scales = tuple(
+        int(scale) for scale in model_cfg.get("texture_pool_scales", (1, 2, 4))
+    )
     return RTHBTNet(
         in_channels=int(model_cfg.get("in_channels", 1)),
         base_channels=int(model_cfg.get("base_channels", 24)),
@@ -262,6 +302,11 @@ def build_model_from_config(config: dict[str, Any]) -> RTHBTNet:
         encoder=str(model_cfg.get("encoder", "mobilenetv3_small")),
         encoder_truncate_at=int(model_cfg.get("encoder_truncate_at", 4)),
         encoder_include_edges=bool(model_cfg.get("encoder_include_edges", True)),
+        texture_num_blocks=int(
+            model_cfg.get("texture_num_blocks", model_cfg.get("num_temporal_blocks", 3))
+        ),
+        texture_pool_scales=texture_pool_scales,
+        texture_use_tsm=bool(model_cfg.get("texture_use_tsm", True)),
         fusion_eps=float(fusion_cfg.get("eps", 1.0e-6)),
         min_confidence=float(fusion_cfg.get("min_confidence", 0.0)),
     )

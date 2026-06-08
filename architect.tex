@@ -95,7 +95,7 @@
 
 % FIX 1: \mathbb{R} must not be split across lines
 \node[tealnd=2.15cm] (shared_feat) at (12.0,0)
-  {Shared feature\\$F_t \in \mathbb{R}^{D}$};
+  {Shared feature map\\$F_t \in \mathbb{R}^{D \times H' \times W'}$};
 
 \draw[arr, color=cGrayB] (video.east) -- (roi.west);
 \draw[arr, color=cGrayB] (roi.east) -- (desc.west);
@@ -116,10 +116,10 @@
 % Temporal Texture Branch
 % =========================================================
 \node[bluend=2.45cm] (tex_head) at (15.55,2.55)
-  {Temporal texture\\head};
+  {TSM texture\\head};
 
 \node[bluend=2.45cm] (tcn) at (18.8,2.55)
-  {Temporal\\modeling\\(TCN / 1D CNN)};
+  {(2+1)D conv\\+ multi-scale\\ROI pooling};
 
 \node[greennd=1.75cm] (spd_tex) at (21.95,3.15)
   {Speed\\head\\$\hat{v}^{tex}_t$};

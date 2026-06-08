@@ -41,6 +41,9 @@ model:
   in_channels: 1
   base_channels: 24
   temporal_hidden: 64
+  texture_num_blocks: 3
+  texture_pool_scales: [1, 2, 4]
+  texture_use_tsm: true
   dropout: 0.1
   use_context: true
   context_hidden: 64
