@@ -19,7 +19,7 @@ except ImportError:
 from models.rt_hbtnet import build_model_from_config
 from utils.filters import SpeedStabilizer
 from utils.preprocessing import preprocess_roi
-from utils.roi import extract_rois
+from utils.roi import detect_motion_rois, extract_rois, is_auto_motion_mode
 from utils.speed_calibration import SpeedCalibrator, robust_roi_fusion
 from utils.visualization import draw_rois, make_dashboard_frame
 
@@ -123,12 +123,52 @@ def make_writer(path: str | None, cap: cv2.VideoCapture, target_fps: float) -> c
 
 
 def fixed_roi_boxes(config: dict[str, Any]) -> list[list[int]]:
-    """Return fixed ROI boxes from config, or an empty list for full-frame mode."""
+    """Return active fixed-like ROI boxes, or an empty list for full-frame mode."""
 
     roi_cfg = config.get("roi", {})
-    if str(roi_cfg.get("mode", "fixed")).lower() != "fixed":
+    mode = str(roi_cfg.get("mode", "fixed")).lower()
+    if mode != "fixed" and not is_auto_motion_mode(config):
         return []
     return [[int(v) for v in roi] for roi in roi_cfg.get("rois", [])]
+
+
+def warmup_auto_motion_rois(cap: cv2.VideoCapture, config: dict[str, Any], rewind: bool) -> None:
+    """Detect and lock auto-motion ROIs before the main inference loop."""
+
+    if not is_auto_motion_mode(config):
+        return
+
+    roi_cfg = config.setdefault("roi", {})
+    if roi_cfg.get("rois"):
+        return
+
+    auto_cfg = roi_cfg.get("auto_motion", {})
+    warmup_frames = max(2, int(auto_cfg.get("warmup_frames", 45)))
+    start_pos = cap.get(cv2.CAP_PROP_POS_FRAMES)
+    frames: list[np.ndarray] = []
+
+    for _ in range(warmup_frames):
+        ok, frame = cap.read()
+        if not ok or frame is None:
+            break
+        frames.append(frame)
+
+    detected = detect_motion_rois(frames, config)
+    if detected:
+        roi_cfg["rois"] = [list(roi) for roi in detected]
+        print(f"auto ROI detected: {roi_cfg['rois']}")
+    else:
+        fallback = str(auto_cfg.get("fallback", "full")).lower()
+        fallback_rois = auto_cfg.get("fallback_rois", [])
+        if fallback == "fixed" and fallback_rois:
+            roi_cfg["rois"] = [[int(v) for v in roi] for roi in fallback_rois]
+            print(f"auto ROI fallback fixed: {roi_cfg['rois']}")
+        else:
+            roi_cfg["rois"] = []
+            print("auto ROI fallback: full frame")
+
+    if rewind and frames:
+        cap.set(cv2.CAP_PROP_POS_FRAMES, start_pos)
 
 
 def has_roi_error(frame: np.ndarray, rois: list[list[int]]) -> bool:
@@ -205,6 +245,7 @@ def main() -> None:
     if args.known_speed is None and calibration_path.exists():
         calibrator = SpeedCalibrator.load(calibration_path)
     cap = open_capture(args)
+    warmup_auto_motion_rois(cap, config, rewind=args.video is not None)
     writer = make_writer(args.save_output, cap, target_fps)
 
     buffers: list[deque[np.ndarray]] = []

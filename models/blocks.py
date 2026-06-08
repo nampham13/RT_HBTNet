@@ -263,11 +263,24 @@ class MultiScaleTemporalPool(nn.Module):
         if x.ndim != 5:
             raise ValueError("x must have shape B,C,T,H,W")
 
-        pooled = [
-            F.adaptive_avg_pool3d(x, output_size=(1, scale, scale)).flatten(1)
-            for scale in self.scales
-        ]
+        pooled = [self._pool_one_scale(x, scale).flatten(1) for scale in self.scales]
         return self.proj(torch.cat(pooled, dim=1))
+
+    @staticmethod
+    def _pool_one_scale(x: torch.Tensor, scale: int) -> torch.Tensor:
+        if scale == 1:
+            return x.mean(dim=(2, 3, 4), keepdim=True)
+
+        timesteps = int(x.shape[2])
+        height = int(x.shape[3])
+        width = int(x.shape[4])
+        if height % scale == 0 and width % scale == 0:
+            return F.avg_pool3d(
+                x,
+                kernel_size=(timesteps, height // scale, width // scale),
+                stride=(timesteps, height // scale, width // scale),
+            )
+        return F.adaptive_avg_pool3d(x, output_size=(1, scale, scale))
 
 
 def _last_conv_out_channels(module: nn.Module) -> int:

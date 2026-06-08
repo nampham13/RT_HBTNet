@@ -57,9 +57,25 @@ python scripts/train.py --config configs/default.yaml --synthetic --synthetic-sa
 
 Checkpoints are saved to `runs/train` by default:
 
-- `best.pt`
-- `last.pt`
+- `best.onnx` and `last.onnx` for deployment/inference runtimes that consume ONNX.
+- `best.pt` and `last.pt` PyTorch checkpoints for training state, debugging, or
+  re-exporting.
 - `config.yaml`
+
+Disable ONNX export during training with:
+
+```bash
+python scripts/train.py --config configs/default.yaml --synthetic --no-export-onnx
+```
+
+Export an existing PyTorch checkpoint manually with:
+
+```bash
+python scripts/export_onnx.py --config configs/default.yaml --weights runs/train/best.pt --output runs/train/best.onnx
+```
+
+The ONNX graph keeps batch size dynamic, while sequence length and ROI input
+size are fixed from the config used during export.
 
 ## Run Inference
 
@@ -112,16 +128,23 @@ ROI settings live in `configs/default.yaml`:
 
 ```yaml
 roi:
-  mode: "fixed"
-  rois:
-    - [100, 100, 400, 160]
+  mode: "auto_motion"
+  rois: []
+  auto_motion:
+    warmup_frames: 45
+    max_rois: 1
+    fallback: "full"
   resize_width: 128
   resize_height: 64
 ```
 
-Each ROI is `[x, y, w, h]` in source-frame pixels. Multiple ROIs are supported
-at inference time; RT-HBTNet runs each ROI and uses median speed voting with
-average confidence for display.
+With `auto_motion`, inference reads a short warm-up clip, detects moving
+texture regions with OpenCV frame-difference and Sobel texture energy, then
+locks the detected boxes for the rest of the run. If detection fails, it falls
+back to the full frame by default. For manual ROIs, set `mode: "fixed"` and use
+`rois: [[x, y, w, h]]` in source-frame pixels, or pass `--roi "x,y,w,h"` on the
+CLI. Multiple ROIs are supported at inference time; RT-HBTNet runs each ROI and
+uses median speed voting with average confidence for display.
 
 ## Limitations
 

@@ -20,6 +20,7 @@ except ImportError:
 from datasets import SyntheticSpeedDataset, VideoSpeedDataset
 from models.rt_hbtnet import build_model_from_config, count_parameters
 from utils.metrics import mae, mape, rmse
+from utils.onnx_export import export_model_to_onnx
 
 
 def load_config(path: str | Path) -> dict[str, Any]:
@@ -203,6 +204,9 @@ def main() -> None:
     parser.add_argument("--num-workers", type=int, default=None)
     parser.add_argument("--synthetic-samples", type=int, default=None)
     parser.add_argument("--save-dir", default="runs/train")
+    parser.add_argument("--export-onnx", dest="export_onnx", action="store_true", default=None)
+    parser.add_argument("--no-export-onnx", dest="export_onnx", action="store_false")
+    parser.add_argument("--onnx-opset", type=int, default=None)
     args = parser.parse_args()
 
     config_path = resolve_project_path(args.config)
@@ -218,6 +222,10 @@ def main() -> None:
         train_cfg["num_workers"] = int(args.num_workers)
     if args.synthetic_samples is not None:
         config.setdefault("synthetic", {})["num_samples"] = int(args.synthetic_samples)
+    if args.export_onnx is not None:
+        train_cfg["export_onnx"] = bool(args.export_onnx)
+    if args.onnx_opset is not None:
+        train_cfg["onnx_opset"] = int(args.onnx_opset)
 
     seed = int(config.get("project", {}).get("seed", 42))
     set_seed(seed)
@@ -259,6 +267,8 @@ def main() -> None:
 
     best_mae = float("inf")
     epochs = int(train_cfg.get("epochs", 20))
+    export_onnx = bool(train_cfg.get("export_onnx", True))
+    onnx_opset = int(train_cfg.get("onnx_opset", 17))
     for epoch in range(1, epochs + 1):
         train_loss = run_train_epoch(model, train_loader, optimizer, device, loss_cfg, epoch)
         val_metrics = evaluate(model, val_loader, device)
@@ -282,6 +292,25 @@ def main() -> None:
         if val_metrics["mae"] < best_mae:
             best_mae = val_metrics["mae"]
             torch.save(checkpoint, save_dir / "best.pt")
+            if export_onnx:
+                best_onnx = export_model_to_onnx(
+                    model,
+                    config,
+                    save_dir / "best.onnx",
+                    opset=onnx_opset,
+                    verify=False,
+                )
+                print(f"saved ONNX: {best_onnx}")
+
+    if export_onnx:
+        last_onnx = export_model_to_onnx(
+            model,
+            config,
+            save_dir / "last.onnx",
+            opset=onnx_opset,
+            verify=False,
+        )
+        print(f"saved ONNX: {last_onnx}")
 
 
 if __name__ == "__main__":
