@@ -77,6 +77,8 @@ training:
   lr: 0.001
   weight_decay: 0.00001
   num_workers: 2
+  export_onnx: true
+  onnx_opset: 17
   loss:
     main_weight: 1.0
     tex_weight: 0.5

@@ -57,9 +57,25 @@ python scripts/train.py --config configs/default.yaml --synthetic --synthetic-sa
 
 Checkpoints are saved to `runs/train` by default:
 
-- `best.pt`
-- `last.pt`
+- `best.onnx` and `last.onnx` for deployment/inference runtimes that consume ONNX.
+- `best.pt` and `last.pt` PyTorch checkpoints for training state, debugging, or
+  re-exporting.
 - `config.yaml`
+
+Disable ONNX export during training with:
+
+```bash
+python scripts/train.py --config configs/default.yaml --synthetic --no-export-onnx
+```
+
+Export an existing PyTorch checkpoint manually with:
+
+```bash
+python scripts/export_onnx.py --config configs/default.yaml --weights runs/train/best.pt --output runs/train/best.onnx
+```
+
+The ONNX graph keeps batch size dynamic, while sequence length and ROI input
+size are fixed from the config used during export.
 
 ## Run Inference
 
