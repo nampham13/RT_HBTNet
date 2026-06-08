@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import csv
+from copy import deepcopy
 from pathlib import Path
 from typing import Any
 
@@ -10,7 +11,7 @@ import torch
 from torch.utils.data import Dataset
 
 from utils.preprocessing import preprocess_roi, stack_sequence
-from utils.roi import extract_rois
+from utils.roi import detect_motion_rois, extract_rois, is_auto_motion_mode
 
 
 def _default_config(sequence_length: int = 64) -> dict[str, Any]:
@@ -86,7 +87,7 @@ class VideoSpeedDataset(Dataset):
         if not cap.isOpened():
             raise FileNotFoundError(f"Could not open video for dataset sample {index}: {video_path}")
 
-        frames_chw: list[np.ndarray] = []
+        raw_frames: list[np.ndarray] = []
         try:
             for frame_idx in frame_indices:
                 cap.set(cv2.CAP_PROP_POS_FRAMES, int(frame_idx))
@@ -97,23 +98,39 @@ class VideoSpeedDataset(Dataset):
                         f"for dataset sample {index}"
                     )
 
-                rois = extract_rois(frame, self.config)
-                if not rois:
-                    raise RuntimeError(f"No ROIs extracted from video '{video_path}' at frame {frame_idx}")
-                if self.roi_index >= len(rois):
-                    raise IndexError(
-                        f"roi_index={self.roi_index} is out of range for {len(rois)} ROI(s) "
-                        f"in video '{video_path}'"
-                    )
-
-                roi = rois[self.roi_index]
-                frames_chw.append(preprocess_roi(roi, self.config))  # C,H,W
+                raw_frames.append(frame)
         finally:
             cap.release()
+
+        sample_config = self._sample_roi_config(raw_frames)
+        frames_chw: list[np.ndarray] = []
+        for frame in raw_frames:
+            rois = extract_rois(frame, sample_config)
+            if not rois:
+                raise RuntimeError(f"No ROIs extracted from video '{video_path}' for dataset sample {index}")
+            if self.roi_index >= len(rois):
+                raise IndexError(
+                    f"roi_index={self.roi_index} is out of range for {len(rois)} ROI(s) "
+                    f"in video '{video_path}'"
+                )
+
+            roi = rois[self.roi_index]
+            frames_chw.append(preprocess_roi(roi, sample_config))  # C,H,W
 
         x_seq = torch.from_numpy(stack_sequence(frames_chw)).float()  # T,C,H,W
         y_speed = torch.tensor([float(record["speed_mps"])], dtype=torch.float32)  # 1
         return x_seq, y_speed
+
+    def _sample_roi_config(self, raw_frames: list[np.ndarray]) -> dict[str, Any]:
+        if not is_auto_motion_mode(self.config):
+            return self.config
+        if self.config.get("roi", {}).get("rois"):
+            return self.config
+
+        sample_config = deepcopy(self.config)
+        roi_cfg = sample_config.setdefault("roi", {})
+        roi_cfg["rois"] = [list(roi) for roi in detect_motion_rois(raw_frames, sample_config)]
+        return sample_config
 
     def _resolve_video_path(self, value: str) -> Path:
         path = Path(value)

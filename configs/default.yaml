@@ -28,9 +28,20 @@ augmentation:
   jpeg_quality: [35, 95]
 
 roi:
-  mode: "fixed"
-  rois:
-    - [100, 100, 400, 160]
+  mode: "auto_motion"
+  rois: []
+  auto_motion:
+    warmup_frames: 45
+    max_rois: 1
+    motion_threshold: 18.0
+    score_threshold: 20.0
+    score_percentile: 70.0
+    min_area_ratio: 0.02
+    max_area_ratio: 0.85
+    margin_ratio: 0.12
+    blur_kernel: 5
+    morph_kernel: 7
+    fallback: "full"
   resize_width: 128
   resize_height: 64
 
