@@ -16,13 +16,17 @@ RT-HBTNet combines two lightweight visual branches:
   decomposed `(2+1)D` convolutions, and multi-scale ROI pooling so local texture
   motion remains visible across changes in apparent belt scale.
 - Blur Physics Branch learns speed from motion-blur-induced visual signatures in
-  a key ROI frame. This is a learned latent cue, not an explicit blur-length
-  measurement.
+  a key ROI frame. It combines learned CNN features with fixed physics-inspired
+  descriptors: Sobel edge attenuation, radial FFT frequency-band statistics, and
+  horizontal, vertical, and diagonal directional blur-kernel responses. This is
+  still a learned latent cue, not an explicit blur-length measurement.
 - Context Encoder estimates observation quality and branch reliability context.
   It does not estimate speed; it helps fusion decide whether the Temporal
   Texture Branch or Blur Physics Branch should be trusted more.
-- Confidence-aware fusion combines the texture and blur predictions using their
-  predicted confidences plus the context branch-bias signal.
+- Cross-attention fusion lets texture features query blur features and blur
+  features query texture features. The resulting attention bias is combined with
+  branch confidence and context bias before producing the final texture-vs-blur
+  fusion weights.
 - EMA or Kalman stabilization smooths the final speed estimate for display.
 
 Input tensors use shape `B,T,C,H,W`.
@@ -75,7 +79,10 @@ python scripts/export_onnx.py --config configs/default.yaml --weights runs/train
 ```
 
 The ONNX graph keeps batch size dynamic, while sequence length and ROI input
-size are fixed from the config used during export.
+size are fixed from the config used during export. During PyTorch
+training/inference the blur physics descriptor uses `torch.fft.rfft2`; during
+ONNX export it switches to an equivalent fixed-size DFT path built from
+matrix multiplications so export remains compatible with opset 17.
 
 ## Run Inference
 
