@@ -6,6 +6,7 @@ import torch
 from torch import nn
 from torch.nn import functional as F
 
+from .blur_physics_branch import BlurPhysicsDescriptor
 from .blocks import (
     Conv2Plus1DBlock,
     MLPHead,
@@ -69,24 +70,43 @@ class TemporalTextureHead(nn.Module):
 
 
 class BlurFeatureHead(nn.Module):
-    """Blur speed head operating on the shared key-frame feature."""
+    """Blur speed head operating on shared features plus fixed blur physics."""
 
-    def __init__(self, feature_dim: int = 64, dropout: float = 0.1) -> None:
+    def __init__(self, feature_dim: int = 64, in_channels: int = 1, dropout: float = 0.1) -> None:
         super().__init__()
+        self.physics_descriptor = BlurPhysicsDescriptor(in_channels=int(in_channels))
+        self.physics_proj = nn.Sequential(
+            nn.Linear(self.physics_descriptor.summary_dim, int(feature_dim)),
+            nn.LayerNorm(int(feature_dim)),
+            nn.SiLU(inplace=True),
+            nn.Dropout(float(dropout)),
+        )
+        self.feature_fuse = nn.Sequential(
+            nn.Linear(int(feature_dim) * 2, int(feature_dim)),
+            nn.LayerNorm(int(feature_dim)),
+            nn.SiLU(inplace=True),
+            nn.Dropout(float(dropout)),
+        )
         self.speed_head = MLPHead(feature_dim, out_dim=1, hidden_dim=feature_dim, dropout=float(dropout))
         self.conf_head = MLPHead(feature_dim, out_dim=1, hidden_dim=feature_dim, dropout=float(dropout))
         init_lightweight(self)
 
-    def forward(self, key_feature: torch.Tensor) -> dict[str, torch.Tensor]:
+    def forward(self, key_feature: torch.Tensor, key_frame: torch.Tensor) -> dict[str, torch.Tensor]:
         if key_feature.ndim != 2:
             raise ValueError("key_feature must have shape B,D")
+        if key_frame.ndim != 4:
+            raise ValueError("key_frame must have shape B,C,H,W")
 
-        speed_blur = F.softplus(self.speed_head(key_feature))
-        conf_blur = torch.sigmoid(self.conf_head(key_feature))
+        physics_summary = self.physics_descriptor.summary_features(key_frame)
+        physics_feature = self.physics_proj(physics_summary)
+        blur_feature = self.feature_fuse(torch.cat([key_feature, physics_feature], dim=1))
+
+        speed_blur = F.softplus(self.speed_head(blur_feature))
+        conf_blur = torch.sigmoid(self.conf_head(blur_feature))
         return {
             "speed_blur": speed_blur,
             "conf_blur": conf_blur,
-            "blur_features": key_feature,
+            "blur_features": blur_feature,
         }
 
 
@@ -193,7 +213,7 @@ class RTHBTNet(nn.Module):
             frame_features = self.frame_encoder.pool_features(feature_maps_flat)
             frame_features = frame_features.reshape(b, t, -1)  # B,T,D
             texture = self.texture_head(frame_maps)
-            blur = self.blur_head(frame_features[:, -1])
+            blur = self.blur_head(frame_features[:, -1], x_seq[:, -1])
             context = self._encode_context(frame_features=frame_features)
 
         fused = self.fusion(

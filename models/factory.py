@@ -132,6 +132,7 @@ class EncoderComponentFactory:
             ),
             blur_head=BlurFeatureHead(
                 feature_dim=cfg.temporal_hidden,
+                in_channels=cfg.in_channels,
                 dropout=cfg.dropout,
             ),
             texture_branch=None,

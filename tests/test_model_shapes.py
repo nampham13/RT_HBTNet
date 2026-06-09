@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import torch
 
+from models.blur_physics_branch import BlurPhysicsBranch, BlurPhysicsDescriptor
 from models.blocks import TemporalShift
 from models.rt_hbtnet import TemporalTextureHead
 from models import RTHBTNet
@@ -48,6 +49,38 @@ def test_model_without_context_omits_context_outputs() -> None:
     assert "obs_quality" not in out
     assert "context_bias_tex" not in out
     assert "context_bias_blur" not in out
+
+
+def test_blur_physics_descriptor_adds_fft_and_directional_features() -> None:
+    descriptor = BlurPhysicsDescriptor(in_channels=1)
+    x = torch.rand(2, 1, 32, 48)
+
+    spatial, summary = descriptor(x)
+
+    assert descriptor.fft_feature_dim == 6
+    assert descriptor.directional_feature_dim == 5
+    assert spatial.shape == (2, descriptor.spatial_descriptor_channels, 32, 48)
+    assert summary.shape == (2, descriptor.summary_dim)
+    assert torch.isfinite(summary).all()
+
+
+def test_legacy_blur_physics_branch_shapes() -> None:
+    branch = BlurPhysicsBranch(
+        in_channels=1,
+        base_channels=8,
+        feature_dim=16,
+        dropout=0.0,
+    ).eval()
+    x = torch.rand(2, 1, 32, 48)
+
+    with torch.no_grad():
+        out = branch(x)
+
+    assert out["speed_blur"].shape == (2, 1)
+    assert out["conf_blur"].shape == (2, 1)
+    assert out["blur_features"].shape == (2, 16)
+    assert torch.all(out["conf_blur"] >= 0.0)
+    assert torch.all(out["conf_blur"] <= 1.0)
 
 
 def test_temporal_texture_head_accepts_feature_maps() -> None:
