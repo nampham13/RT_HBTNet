@@ -103,3 +103,11 @@ class SpeedStabilizer:
 
 # Backward-compatible alias for earlier prototype imports.
 KalmanFilter1D = SimpleKalmanFilter1D
+
+
+class StabilizerFactory:
+    """Factory facade for config-driven speed stabilizers."""
+
+    @staticmethod
+    def create(config: dict[str, Any]) -> SpeedStabilizer:
+        return SpeedStabilizer(config)

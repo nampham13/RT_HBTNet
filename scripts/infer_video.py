@@ -17,7 +17,7 @@ except ImportError:
     from _bootstrap import ROOT
 
 from models.rt_hbtnet import build_model_from_config
-from utils.filters import SpeedStabilizer
+from utils.filters import StabilizerFactory
 from utils.preprocessing import preprocess_roi
 from utils.roi import detect_motion_rois, extract_rois, is_auto_motion_mode
 from utils.speed_calibration import SpeedCalibrator, robust_roi_fusion
@@ -239,7 +239,7 @@ def main() -> None:
 
     device = choose_device(config)
     model = load_model(config, args.weights, device)
-    stabilizer = SpeedStabilizer(config)
+    stabilizer = StabilizerFactory.create(config)
     calibration_path = resolve_project_path(args.calibration)
     calibrator = SpeedCalibrator()
     if args.known_speed is None and calibration_path.exists():

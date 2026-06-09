@@ -6,17 +6,13 @@ import torch
 from torch import nn
 from torch.nn import functional as F
 
-from .blur_physics_branch import BlurPhysicsBranch
 from .blocks import (
     Conv2Plus1DBlock,
     MLPHead,
-    MobileNetV3SmallFrameEncoder,
     MultiScaleTemporalPool,
     init_lightweight,
 )
-from .context_encoder import ObservationContextEncoder
-from .fusion import ConfidenceAwareFusion
-from .temporal_texture_branch import TemporalTextureBranch
+from .factory import EncoderComponentFactory, ModelAuxFactory, ModelBuildConfig, RTHBTNetFactory
 
 
 class TemporalTextureHead(nn.Module):
@@ -108,7 +104,7 @@ class RTHBTNet(nn.Module):
 
     def __init__(
         self,
-        in_channels: int = 1,
+        in_channels: int | ModelBuildConfig = 1,
         base_channels: int = 24,
         temporal_hidden: int = 64,
         dropout: float = 0.1,
@@ -124,62 +120,38 @@ class RTHBTNet(nn.Module):
         min_confidence: float = 0.0,
     ) -> None:
         super().__init__()
-        self.use_context = bool(use_context)
-        self.in_channels = int(in_channels)
-        self.encoder_type = str(encoder).lower()
-        self.encoder_include_edges = bool(encoder_include_edges)
-
-        if self.encoder_type in ("legacy", "separate", "separate_encoders"):
-            self.texture_branch = TemporalTextureBranch(
-                in_channels=self.in_channels,
+        cfg = (
+            in_channels
+            if isinstance(in_channels, ModelBuildConfig)
+            else ModelBuildConfig(
+                in_channels=int(in_channels),
                 base_channels=int(base_channels),
                 temporal_hidden=int(temporal_hidden),
                 dropout=float(dropout),
-                num_temporal_blocks=int(texture_num_blocks),
-                pool_scales=tuple(texture_pool_scales),
-                use_tsm=bool(texture_use_tsm),
+                use_context=bool(use_context),
+                context_hidden=context_hidden,
+                encoder=str(encoder),
+                encoder_truncate_at=int(encoder_truncate_at),
+                encoder_include_edges=bool(encoder_include_edges),
+                texture_num_blocks=int(texture_num_blocks),
+                texture_pool_scales=tuple(texture_pool_scales),
+                texture_use_tsm=bool(texture_use_tsm),
+                fusion_eps=float(fusion_eps),
+                min_confidence=float(min_confidence),
             )
-            self.blur_branch = BlurPhysicsBranch(
-                in_channels=self.in_channels,
-                base_channels=int(base_channels),
-                feature_dim=int(temporal_hidden),
-                dropout=float(dropout),
-            )
-            self.frame_encoder = None
-            self.texture_head = None
-            self.blur_head = None
-        elif self.encoder_type in ("mobilenetv3_small", "mobilenetv3_small_truncated"):
-            descriptor_channels = self.in_channels * (2 if self.encoder_include_edges else 1)
-            self.frame_encoder = MobileNetV3SmallFrameEncoder(
-                in_ch=descriptor_channels,
-                feature_dim=int(temporal_hidden),
-                truncate_at=int(encoder_truncate_at),
-            )
-            self.texture_head = TemporalTextureHead(
-                feature_dim=int(temporal_hidden),
-                dropout=float(dropout),
-                num_temporal_blocks=int(texture_num_blocks),
-                pool_scales=tuple(texture_pool_scales),
-                use_tsm=bool(texture_use_tsm),
-            )
-            self.blur_head = BlurFeatureHead(
-                feature_dim=int(temporal_hidden),
-                dropout=float(dropout),
-            )
-            self.texture_branch = None
-            self.blur_branch = None
-        else:
-            raise ValueError(f"Unsupported encoder type: {encoder}")
-
-        self.context_encoder = (
-            ObservationContextEncoder(
-                feature_dim=int(temporal_hidden),
-                hidden_dim=context_hidden,
-                dropout=float(dropout),
-            )
-            if self.use_context
-            else None
         )
+        self.use_context = cfg.use_context
+        self.in_channels = cfg.in_channels
+        self.encoder_type = cfg.encoder_type
+        self.encoder_include_edges = cfg.encoder_include_edges
+
+        components = EncoderComponentFactory.create(cfg)
+        self.frame_encoder = components.frame_encoder
+        self.texture_head = components.texture_head
+        self.blur_head = components.blur_head
+        self.texture_branch = components.texture_branch
+        self.blur_branch = components.blur_branch
+        self.context_encoder = ModelAuxFactory.create_context_encoder(cfg)
 
         sobel_x = torch.tensor(
             [[-1.0, 0.0, 1.0], [-2.0, 0.0, 2.0], [-1.0, 0.0, 1.0]],
@@ -191,7 +163,7 @@ class RTHBTNet(nn.Module):
         ).view(1, 1, 3, 3)
         self.register_buffer("sobel_x", sobel_x.repeat(self.in_channels, 1, 1, 1), persistent=False)
         self.register_buffer("sobel_y", sobel_y.repeat(self.in_channels, 1, 1, 1), persistent=False)
-        self.fusion = ConfidenceAwareFusion(eps=float(fusion_eps), min_confidence=float(min_confidence))
+        self.fusion = ModelAuxFactory.create_fusion(cfg)
 
     def forward(self, x_seq: torch.Tensor) -> dict[str, torch.Tensor]:
         if x_seq.ndim != 5:
@@ -287,29 +259,7 @@ def count_parameters(model: nn.Module) -> int:
 def build_model_from_config(config: dict[str, Any]) -> RTHBTNet:
     """Build ``RTHBTNet`` from the project config dictionary."""
 
-    model_cfg = config.get("model", {})
-    fusion_cfg = config.get("fusion", {})
-    texture_pool_scales = tuple(
-        int(scale) for scale in model_cfg.get("texture_pool_scales", (1, 2, 4))
-    )
-    return RTHBTNet(
-        in_channels=int(model_cfg.get("in_channels", 1)),
-        base_channels=int(model_cfg.get("base_channels", 24)),
-        temporal_hidden=int(model_cfg.get("temporal_hidden", model_cfg.get("feature_dim", 64))),
-        dropout=float(model_cfg.get("dropout", 0.1)),
-        use_context=bool(model_cfg.get("use_context", True)),
-        context_hidden=None if model_cfg.get("context_hidden") is None else int(model_cfg.get("context_hidden")),
-        encoder=str(model_cfg.get("encoder", "mobilenetv3_small")),
-        encoder_truncate_at=int(model_cfg.get("encoder_truncate_at", 4)),
-        encoder_include_edges=bool(model_cfg.get("encoder_include_edges", True)),
-        texture_num_blocks=int(
-            model_cfg.get("texture_num_blocks", model_cfg.get("num_temporal_blocks", 3))
-        ),
-        texture_pool_scales=texture_pool_scales,
-        texture_use_tsm=bool(model_cfg.get("texture_use_tsm", True)),
-        fusion_eps=float(fusion_cfg.get("eps", 1.0e-6)),
-        min_confidence=float(fusion_cfg.get("min_confidence", 0.0)),
-    )
+    return RTHBTNetFactory.create(config)
 
 
 if __name__ == "__main__":

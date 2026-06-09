@@ -17,7 +17,7 @@ try:
 except ImportError:
     from _bootstrap import ROOT
 
-from datasets import SyntheticSpeedDataset, VideoSpeedDataset
+from datasets import DatasetFactory
 from models.rt_hbtnet import build_model_from_config, count_parameters
 from utils.metrics import mae, mape, rmse
 from utils.onnx_export import export_model_to_onnx
@@ -64,15 +64,11 @@ def resolve_project_path(path_value: str | Path) -> Path:
 def build_dataset(args: argparse.Namespace, config: dict[str, Any]) -> Dataset:
     """Build either synthetic or labeled-video dataset."""
 
-    if args.synthetic:
-        return SyntheticSpeedDataset(config=config)
-
-    labels_path = resolve_project_path(args.labels)
-    video_root = resolve_project_path(args.video_root)
-    return VideoSpeedDataset(
-        labels_csv=labels_path,
-        video_root=video_root,
+    return DatasetFactory.create(
+        synthetic=bool(args.synthetic),
         config=config,
+        labels_csv=None if args.synthetic else resolve_project_path(args.labels),
+        video_root=None if args.synthetic else resolve_project_path(args.video_root),
     )
 
 
