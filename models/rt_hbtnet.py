@@ -223,6 +223,8 @@ class RTHBTNet(nn.Module):
             conf_blur=blur["conf_blur"],  # B,1
             context_bias=None if context is None else context["context_bias"],  # B,2
             obs_quality=None if context is None else context["obs_quality"],  # B,1
+            texture_features=texture["texture_features"],  # B,D
+            blur_features=blur["blur_features"],  # B,D
         )
 
         out = {
@@ -235,6 +237,13 @@ class RTHBTNet(nn.Module):
             "w_tex": fused["w_tex"],  # B,1
             "w_blur": fused["w_blur"],  # B,1
         }
+        if "fusion_attention_bias_tex" in fused:
+            out.update(
+                {
+                    "fusion_attention_bias_tex": fused["fusion_attention_bias_tex"],  # B,1
+                    "fusion_attention_bias_blur": fused["fusion_attention_bias_blur"],  # B,1
+                }
+            )
         if context is not None:
             out.update(
                 {

@@ -155,7 +155,12 @@ class ModelAuxFactory:
 
     @staticmethod
     def create_fusion(cfg: ModelBuildConfig) -> ConfidenceAwareFusion:
-        return ConfidenceAwareFusion(eps=cfg.fusion_eps, min_confidence=cfg.min_confidence)
+        return ConfidenceAwareFusion(
+            eps=cfg.fusion_eps,
+            min_confidence=cfg.min_confidence,
+            feature_dim=cfg.temporal_hidden,
+            dropout=cfg.dropout,
+        )
 
 
 class RTHBTNetFactory:
