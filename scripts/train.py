@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import csv
 import random
 from pathlib import Path
 from typing import Any
@@ -133,11 +134,17 @@ def run_train_epoch(
     device: torch.device,
     loss_weights: dict[str, float],
     epoch: int,
-) -> float:
-    """Run one training epoch and return mean loss."""
+) -> dict[str, float]:
+    """Run one training epoch and return mean loss values."""
 
     model.train()
     losses: list[float] = []
+    loss_parts_accum: dict[str, list[float]] = {
+        "main_loss": [],
+        "tex_loss": [],
+        "blur_loss": [],
+        "conf_reg": [],
+    }
     progress = tqdm(loader, desc=f"train {epoch}", leave=False)
     for x_seq, y_speed in progress:
         x_seq = x_seq.to(device, non_blocking=True).float()  # B,T,C,H,W
@@ -151,12 +158,20 @@ def run_train_epoch(
         optimizer.step()
 
         losses.append(float(loss.detach().cpu()))
+        for name, value in loss_parts.items():
+            loss_parts_accum[name].append(float(value))
         progress.set_postfix(
             loss=f"{np.mean(losses):.4f}",
             main=f"{loss_parts['main_loss']:.4f}",
         )
 
-    return float(np.mean(losses)) if losses else 0.0
+    return {
+        "train_loss": float(np.mean(losses)) if losses else 0.0,
+        **{
+            name: float(np.mean(values)) if values else 0.0
+            for name, values in loss_parts_accum.items()
+        },
+    }
 
 
 @torch.no_grad()
@@ -189,6 +204,73 @@ def save_config_copy(config: dict[str, Any], save_dir: Path) -> None:
         yaml.safe_dump(config, handle, sort_keys=False)
 
 
+def write_history_csv(history: list[dict[str, float]], output_path: Path) -> None:
+    """Write per-epoch training history to CSV."""
+
+    if not history:
+        return
+    fieldnames = list(history[0].keys())
+    with output_path.open("w", newline="", encoding="utf-8") as handle:
+        writer = csv.DictWriter(handle, fieldnames=fieldnames)
+        writer.writeheader()
+        writer.writerows(history)
+
+
+def plot_training_history(history: list[dict[str, float]], output_path: Path) -> None:
+    """Save a PNG chart with training losses and validation metrics."""
+
+    if not history:
+        return
+
+    import matplotlib
+
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    epochs = [row["epoch"] for row in history]
+    fig, axes = plt.subplots(2, 1, figsize=(10, 8), sharex=True)
+
+    loss_axis = axes[0]
+    for key, label in (
+        ("train_loss", "total"),
+        ("main_loss", "fused"),
+        ("tex_loss", "texture"),
+        ("blur_loss", "blur"),
+        ("conf_reg", "confidence reg"),
+    ):
+        values = [row[key] for row in history]
+        loss_axis.plot(epochs, values, marker="o", linewidth=1.6, label=label)
+    loss_axis.set_title("Training losses")
+    loss_axis.set_ylabel("L1 loss")
+    loss_axis.grid(True, alpha=0.3)
+    loss_axis.legend(loc="best")
+
+    metric_axis = axes[1]
+    metric_axis.plot(epochs, [row["val_mae"] for row in history], marker="o", linewidth=1.6, label="MAE")
+    metric_axis.plot(epochs, [row["val_rmse"] for row in history], marker="o", linewidth=1.6, label="RMSE")
+    metric_axis.set_title("Validation speed error")
+    metric_axis.set_xlabel("Epoch")
+    metric_axis.set_ylabel("m/s")
+    metric_axis.grid(True, alpha=0.3)
+    metric_axis.legend(loc="upper left")
+
+    mape_axis = metric_axis.twinx()
+    mape_axis.plot(
+        epochs,
+        [row["val_mape"] for row in history],
+        color="tab:red",
+        linestyle="--",
+        linewidth=1.4,
+        label="MAPE",
+    )
+    mape_axis.set_ylabel("MAPE (%)")
+    mape_axis.legend(loc="upper right")
+
+    fig.tight_layout()
+    fig.savefig(output_path, dpi=160)
+    plt.close(fig)
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Train RT-HBTNet")
     parser.add_argument("--config", default="configs/default.yaml")
@@ -203,6 +285,7 @@ def main() -> None:
     parser.add_argument("--export-onnx", dest="export_onnx", action="store_true", default=None)
     parser.add_argument("--no-export-onnx", dest="export_onnx", action="store_false")
     parser.add_argument("--onnx-opset", type=int, default=None)
+    parser.add_argument("--no-plots", dest="plots", action="store_false", default=True)
     args = parser.parse_args()
 
     config_path = resolve_project_path(args.config)
@@ -265,17 +348,34 @@ def main() -> None:
     epochs = int(train_cfg.get("epochs", 20))
     export_onnx = bool(train_cfg.get("export_onnx", True))
     onnx_opset = int(train_cfg.get("onnx_opset", 17))
+    history: list[dict[str, float]] = []
+    history_path = save_dir / "history.csv"
+    chart_path = save_dir / "training_curves.png"
     for epoch in range(1, epochs + 1):
-        train_loss = run_train_epoch(model, train_loader, optimizer, device, loss_cfg, epoch)
+        train_metrics = run_train_epoch(model, train_loader, optimizer, device, loss_cfg, epoch)
         val_metrics = evaluate(model, val_loader, device)
+        epoch_history = {
+            "epoch": float(epoch),
+            **train_metrics,
+            "val_mae": float(val_metrics["mae"]),
+            "val_rmse": float(val_metrics["rmse"]),
+            "val_mape": float(val_metrics["mape"]),
+        }
+        history.append(epoch_history)
+        write_history_csv(history, history_path)
+        if args.plots:
+            plot_training_history(history, chart_path)
 
         print(
             f"epoch={epoch:03d} "
-            f"train_loss={train_loss:.4f} "
+            f"train_loss={train_metrics['train_loss']:.4f} "
             f"val_mae={val_metrics['mae']:.4f} "
             f"val_rmse={val_metrics['rmse']:.4f} "
             f"val_mape={val_metrics['mape']:.2f}"
         )
+        print(f"saved history: {history_path}")
+        if args.plots:
+            print(f"saved chart: {chart_path}")
 
         checkpoint = {
             "epoch": epoch,
