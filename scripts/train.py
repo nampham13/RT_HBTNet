@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import csv
 import random
+import time
 from pathlib import Path
 from typing import Any
 
@@ -22,6 +23,20 @@ from datasets import DatasetFactory
 from models.rt_hbtnet import build_model_from_config, count_parameters
 from utils.metrics import mae, mape, rmse
 from utils.onnx_export import export_model_to_onnx
+
+
+def sync_if_cuda(device: torch.device) -> None:
+    """Synchronize CUDA so timing reflects completed GPU work."""
+
+    if device.type == "cuda":
+        torch.cuda.synchronize(device)
+
+
+def elapsed_since(start: float, device: torch.device) -> float:
+    """Return elapsed wall time after synchronizing pending CUDA kernels."""
+
+    sync_if_cuda(device)
+    return time.perf_counter() - start
 
 
 def load_config(path: str | Path) -> dict[str, Any]:
@@ -134,6 +149,7 @@ def run_train_epoch(
     device: torch.device,
     loss_weights: dict[str, float],
     epoch: int,
+    profile_timing: bool = False,
 ) -> dict[str, float]:
     """Run one training epoch and return mean loss values."""
 
@@ -145,17 +161,37 @@ def run_train_epoch(
         "blur_loss": [],
         "conf_reg": [],
     }
+    timing = {
+        "train_data_wait_s": 0.0,
+        "train_h2d_s": 0.0,
+        "train_forward_loss_s": 0.0,
+        "train_backward_step_s": 0.0,
+    }
     progress = tqdm(loader, desc=f"train {epoch}", leave=False)
+    sync_if_cuda(device)
+    wait_start = time.perf_counter()
     for x_seq, y_speed in progress:
+        if profile_timing:
+            timing["train_data_wait_s"] += time.perf_counter() - wait_start
+
+        start = time.perf_counter()
         x_seq = x_seq.to(device, non_blocking=True).float()  # B,T,C,H,W
         y_speed = y_speed.to(device, non_blocking=True).float()  # B,1
+        if profile_timing:
+            timing["train_h2d_s"] += elapsed_since(start, device)
 
+        start = time.perf_counter()
         pred = model(x_seq)
         loss, loss_parts = compute_loss(pred, y_speed, loss_weights)
+        if profile_timing:
+            timing["train_forward_loss_s"] += elapsed_since(start, device)
 
+        start = time.perf_counter()
         optimizer.zero_grad(set_to_none=True)
         loss.backward()
         optimizer.step()
+        if profile_timing:
+            timing["train_backward_step_s"] += elapsed_since(start, device)
 
         losses.append(float(loss.detach().cpu()))
         for name, value in loss_parts.items():
@@ -164,6 +200,8 @@ def run_train_epoch(
             loss=f"{np.mean(losses):.4f}",
             main=f"{loss_parts['main_loss']:.4f}",
         )
+        sync_if_cuda(device)
+        wait_start = time.perf_counter()
 
     return {
         "train_loss": float(np.mean(losses)) if losses else 0.0,
@@ -171,22 +209,48 @@ def run_train_epoch(
             name: float(np.mean(values)) if values else 0.0
             for name, values in loss_parts_accum.items()
         },
+        **timing,
     }
 
 
 @torch.no_grad()
-def evaluate(model: nn.Module, loader: DataLoader, device: torch.device) -> dict[str, float]:
+def evaluate(
+    model: nn.Module,
+    loader: DataLoader,
+    device: torch.device,
+    profile_timing: bool = False,
+) -> dict[str, float]:
     """Evaluate validation metrics."""
 
     model.eval()
     preds: list[torch.Tensor] = []
     targets: list[torch.Tensor] = []
+    timing = {
+        "val_data_wait_s": 0.0,
+        "val_h2d_s": 0.0,
+        "val_forward_s": 0.0,
+    }
+    sync_if_cuda(device)
+    wait_start = time.perf_counter()
     for x_seq, y_speed in tqdm(loader, desc="val", leave=False):
+        if profile_timing:
+            timing["val_data_wait_s"] += time.perf_counter() - wait_start
+
+        start = time.perf_counter()
         x_seq = x_seq.to(device, non_blocking=True).float()  # B,T,C,H,W
         y_speed = y_speed.to(device, non_blocking=True).float()  # B,1
+        if profile_timing:
+            timing["val_h2d_s"] += elapsed_since(start, device)
+
+        start = time.perf_counter()
         pred = model(x_seq)
+        if profile_timing:
+            timing["val_forward_s"] += elapsed_since(start, device)
+
         preds.append(pred["speed"].detach().cpu().view(-1))
         targets.append(y_speed.detach().cpu().view(-1))
+        sync_if_cuda(device)
+        wait_start = time.perf_counter()
 
     pred_all = torch.cat(preds)
     target_all = torch.cat(targets)
@@ -194,6 +258,7 @@ def evaluate(model: nn.Module, loader: DataLoader, device: torch.device) -> dict
         "mae": mae(pred_all, target_all),
         "rmse": rmse(pred_all, target_all),
         "mape": mape(pred_all, target_all),
+        **timing,
     }
 
 
@@ -286,6 +351,7 @@ def main() -> None:
     parser.add_argument("--no-export-onnx", dest="export_onnx", action="store_false")
     parser.add_argument("--onnx-opset", type=int, default=None)
     parser.add_argument("--no-plots", dest="plots", action="store_false", default=True)
+    parser.add_argument("--profile-timing", action="store_true", help="Print per-epoch timing breakdowns")
     args = parser.parse_args()
 
     config_path = resolve_project_path(args.config)
@@ -352,19 +418,41 @@ def main() -> None:
     history_path = save_dir / "history.csv"
     chart_path = save_dir / "training_curves.png"
     for epoch in range(1, epochs + 1):
-        train_metrics = run_train_epoch(model, train_loader, optimizer, device, loss_cfg, epoch)
-        val_metrics = evaluate(model, val_loader, device)
+        epoch_start = time.perf_counter()
+        train_start = time.perf_counter()
+        train_metrics = run_train_epoch(
+            model,
+            train_loader,
+            optimizer,
+            device,
+            loss_cfg,
+            epoch,
+            profile_timing=bool(args.profile_timing),
+        )
+        train_elapsed = elapsed_since(train_start, device)
+
+        val_start = time.perf_counter()
+        val_metrics = evaluate(model, val_loader, device, profile_timing=bool(args.profile_timing))
+        val_elapsed = elapsed_since(val_start, device)
         epoch_history = {
             "epoch": float(epoch),
             **train_metrics,
             "val_mae": float(val_metrics["mae"]),
             "val_rmse": float(val_metrics["rmse"]),
             "val_mape": float(val_metrics["mape"]),
+            "epoch_time_s": 0.0,
+            "train_time_s": train_elapsed,
+            "val_time_s": val_elapsed,
+            "artifact_time_s": 0.0,
+            "onnx_time_s": 0.0,
         }
         history.append(epoch_history)
+        artifact_start = time.perf_counter()
         write_history_csv(history, history_path)
         if args.plots:
             plot_training_history(history, chart_path)
+        artifact_elapsed = elapsed_since(artifact_start, device)
+        epoch_history["artifact_time_s"] = artifact_elapsed
 
         print(
             f"epoch={epoch:03d} "
@@ -389,6 +477,7 @@ def main() -> None:
             best_mae = val_metrics["mae"]
             torch.save(checkpoint, save_dir / "best.pt")
             if export_onnx:
+                onnx_start = time.perf_counter()
                 best_onnx = export_model_to_onnx(
                     model,
                     config,
@@ -396,9 +485,36 @@ def main() -> None:
                     opset=onnx_opset,
                     verify=False,
                 )
+                onnx_elapsed = elapsed_since(onnx_start, device)
+                epoch_history["onnx_time_s"] = onnx_elapsed
                 print(f"saved ONNX: {best_onnx}")
+        epoch_history["epoch_time_s"] = elapsed_since(epoch_start, device)
+        write_history_csv(history, history_path)
+        if args.profile_timing:
+            print(
+                "timing: "
+                f"epoch={epoch_history['epoch_time_s']:.2f}s "
+                f"train={train_elapsed:.2f}s "
+                f"val={val_elapsed:.2f}s "
+                f"artifacts={artifact_elapsed:.2f}s "
+                f"onnx={epoch_history['onnx_time_s']:.2f}s"
+            )
+            print(
+                "train detail: "
+                f"data_wait={train_metrics['train_data_wait_s']:.2f}s "
+                f"h2d={train_metrics['train_h2d_s']:.2f}s "
+                f"forward_loss={train_metrics['train_forward_loss_s']:.2f}s "
+                f"backward_step={train_metrics['train_backward_step_s']:.2f}s"
+            )
+            print(
+                "val detail: "
+                f"data_wait={val_metrics['val_data_wait_s']:.2f}s "
+                f"h2d={val_metrics['val_h2d_s']:.2f}s "
+                f"forward={val_metrics['val_forward_s']:.2f}s"
+            )
 
     if export_onnx:
+        last_onnx_start = time.perf_counter()
         last_onnx = export_model_to_onnx(
             model,
             config,
@@ -406,6 +522,8 @@ def main() -> None:
             opset=onnx_opset,
             verify=False,
         )
+        if args.profile_timing:
+            print(f"timing: final_onnx={elapsed_since(last_onnx_start, device):.2f}s")
         print(f"saved ONNX: {last_onnx}")
 
 
