@@ -31,6 +31,17 @@ RT-HBTNet combines two lightweight visual branches:
 
 Input tensors use shape `B,T,C,H,W`.
 
+## Repository Layout
+
+```text
+configs/      YAML configuration files
+datasets/     Synthetic and labeled-video datasets
+models/       RT-HBTNet branches, fusion blocks, and model factory
+scripts/      Training, inference, ONNX export, benchmark, and demo utilities
+tests/        Pytest coverage for ROI, filters, factories, model shapes, and export
+utils/        Preprocessing, ROI detection, metrics, calibration, visualization
+```
+
 ## Installation
 
 ```bash
@@ -43,6 +54,26 @@ For Windows virtual environments:
 python -m venv .venv
 .venv\Scripts\activate
 pip install -r requirements.txt
+```
+
+## Quick Start
+
+Generate a small synthetic conveyor video and matching `labels.csv`:
+
+```bash
+python scripts/demo_synthetic_video.py --output data/synthetic_conveyor.mp4 --speed 2.0 --blur --low-light
+```
+
+Run a short synthetic training smoke test:
+
+```bash
+python scripts/train.py --config configs/default.yaml --synthetic --synthetic-samples 64 --epochs 1 --batch-size 2 --num-workers 0 --save-dir runs/smoke_train
+```
+
+Run inference on the generated video without opening a display window:
+
+```bash
+python scripts/infer_video.py --config configs/default.yaml --weights runs/smoke_train/best.pt --video data/synthetic_conveyor.mp4 --no-display --save-output runs/smoke_train/demo_output.mp4
 ```
 
 ## Train With Synthetic Data
@@ -65,11 +96,19 @@ Checkpoints are saved to `runs/train` by default:
 - `best.pt` and `last.pt` PyTorch checkpoints for training state, debugging, or
   re-exporting.
 - `config.yaml`
+- `history.csv` with per-epoch loss and validation metrics.
+- `training_curves.png` with loss, MAE, RMSE, and MAPE curves.
 
 Disable ONNX export during training with:
 
 ```bash
 python scripts/train.py --config configs/default.yaml --synthetic --no-export-onnx
+```
+
+Disable training curve plots with:
+
+```bash
+python scripts/train.py --config configs/default.yaml --synthetic --no-plots
 ```
 
 Export an existing PyTorch checkpoint manually with:
@@ -102,6 +141,23 @@ Use webcam input:
 python scripts/infer_video.py --config configs/default.yaml --weights runs/train/best.pt --camera 0
 ```
 
+Run headless and save the annotated dashboard video:
+
+```bash
+python scripts/infer_video.py --config configs/default.yaml --weights runs/train/best.pt --video data/synthetic_conveyor.mp4 --no-display --save-output runs/infer/output.mp4
+```
+
+Calibrate the model output against a known belt speed. During the calibration
+window, raw model predictions are collected and a scale factor is saved to
+`calibration.json` by default:
+
+```bash
+python scripts/infer_video.py --config configs/default.yaml --weights runs/train/best.pt --video data/synthetic_conveyor.mp4 --known-speed 2.0 --calibrate-seconds 10 --calibration calibration.json
+```
+
+Later inference runs load the saved calibration file automatically when
+`--known-speed` is omitted.
+
 ## Benchmark
 
 ```bash
@@ -110,6 +166,12 @@ python scripts/benchmark.py --config configs/default.yaml
 
 The benchmark reports device, input shape, parameter count, average latency,
 and FPS.
+
+Benchmark with a trained checkpoint:
+
+```bash
+python scripts/benchmark.py --config configs/default.yaml --weights runs/train/best.pt --batch-size 1 --sequence-length 64
+```
 
 ## Dataset Format
 
@@ -129,6 +191,10 @@ python scripts/train.py --config configs/default.yaml --labels data/labels.csv -
 
 Relative `video_path` values are resolved through `--video-root`.
 
+The labeled-video dataset samples `data.sequence_length` frames evenly from
+`start_frame` to `end_frame`. Each sample is preprocessed into ROI tensors with
+shape `T,C,H,W`; the DataLoader adds the batch dimension used by the model.
+
 ## ROI Config
 
 ROI settings live in `configs/default.yaml`:
@@ -141,6 +207,10 @@ roi:
     warmup_frames: 45
     max_rois: 1
     fallback: "full"
+    motion_threshold: 18.0
+    score_threshold: 20.0
+    min_area_ratio: 0.02
+    max_area_ratio: 0.85
   resize_width: 128
   resize_height: 64
 ```
@@ -152,6 +222,30 @@ back to the full frame by default. For manual ROIs, set `mode: "fixed"` and use
 `rois: [[x, y, w, h]]` in source-frame pixels, or pass `--roi "x,y,w,h"` on the
 CLI. Multiple ROIs are supported at inference time; RT-HBTNet runs each ROI and
 uses median speed voting with average confidence for display.
+
+## Configuration Notes
+
+- `project.device: "auto"` chooses CUDA when available, otherwise CPU.
+- `data.sequence_length` controls the temporal window length.
+- `data.grayscale: true` and `model.in_channels: 1` are the default path.
+- `training.export_onnx: true` exports `best.onnx` during training and
+  `last.onnx` at the end.
+- `stabilization.type` supports `ema` and `kalman` through the stabilizer
+  factory.
+
+## Testing
+
+Run the test suite with:
+
+```bash
+pytest
+```
+
+For a narrower smoke check:
+
+```bash
+pytest tests/test_model_shapes.py tests/test_factories.py
+```
 
 ## Limitations
 
