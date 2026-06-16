@@ -31,7 +31,6 @@ def _base_config() -> dict:
             "use_context": False,
         },
         "fusion": {"eps": 1.0e-6, "min_confidence": 0.0},
-        "synthetic": {"num_samples": 3},
         "augmentation": {"enabled": False},
         "inference": {"target_fps": 30},
         "stabilization": {"type": "ema", "ema_alpha": 0.5},
@@ -62,12 +61,6 @@ def test_build_model_from_config_delegates_to_factory_for_legacy_model() -> None
     assert model.texture_branch is not None
     assert model.blur_branch is not None
     assert model.frame_encoder is None
-
-
-def test_dataset_factory_creates_synthetic_dataset() -> None:
-    dataset = DatasetFactory.create(synthetic=True, config=_base_config())
-
-    assert len(dataset) == 3
 
 
 def test_stabilizer_factory_creates_speed_stabilizer() -> None:

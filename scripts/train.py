@@ -21,9 +21,8 @@ except ImportError:
     from _bootstrap import ROOT
 
 from datasets import DatasetFactory
-from models.rt_hbtnet import build_model_from_config, count_parameters
+from models.rt_hbtnet import build_model_from_config
 from utils.metrics import mae, mape, rmse
-from utils.onnx_export import export_model_to_onnx
 
 
 def sync_if_cuda(device: torch.device) -> None:
@@ -79,13 +78,23 @@ def resolve_project_path(path_value: str | Path) -> Path:
 
 
 def build_dataset(args: argparse.Namespace, config: dict[str, Any]) -> Dataset:
-    """Build either synthetic or labeled-video dataset."""
+    """Build the selected dataset."""
+
+    dataset_type = args.dataset
+    labels_csv = None
+    video_root = None
+    if dataset_type in {"video", "video_speed", "labeled_video"}:
+        labels_csv = resolve_project_path(args.labels)
+        video_root = resolve_project_path(args.video_root)
 
     return DatasetFactory.create(
-        synthetic=bool(args.synthetic),
         config=config,
-        labels_csv=None if args.synthetic else resolve_project_path(args.labels),
-        video_root=None if args.synthetic else resolve_project_path(args.video_root),
+        dataset_type=dataset_type,
+        labels_csv=labels_csv,
+        video_root=video_root,
+        root=None if args.data_root is None else resolve_project_path(args.data_root),
+        manifest_path=None if args.manifest is None else resolve_project_path(args.manifest),
+        split=args.split,
     )
 
 
@@ -108,19 +117,28 @@ def compute_loss(
     pred: dict[str, torch.Tensor],
     gt: torch.Tensor,
     weights: dict[str, float],
+    branch: str = "joint",
 ) -> tuple[torch.Tensor, dict[str, float]]:
-    """Compute weighted L1 branch and fused-speed losses."""
+    """Compute branch-aware L1 losses."""
 
     gt = gt.view(-1, 1)
     l1 = nn.functional.l1_loss
-    main_loss = l1(pred["speed"], gt)
     tex_loss = l1(pred["speed_tex"], gt)
     blur_loss = l1(pred["speed_blur"], gt)
-    total = (
-        float(weights.get("main_weight", 1.0)) * main_loss
-        + float(weights.get("tex_weight", 0.5)) * tex_loss
-        + float(weights.get("blur_weight", 0.5)) * blur_loss
-    )
+    main_loss = l1(pred["speed"], gt)
+
+    if branch == "temporal":
+        total = tex_loss
+        main_loss = tex_loss.detach()
+    elif branch == "blur":
+        total = blur_loss
+        main_loss = blur_loss.detach()
+    else:
+        total = (
+            float(weights.get("main_weight", 1.0)) * main_loss
+            + float(weights.get("tex_weight", 0.5)) * tex_loss
+            + float(weights.get("blur_weight", 0.5)) * blur_loss
+        )
 
     conf_reg_weight = float(weights.get("conf_reg_weight", 0.0))
     conf_reg = torch.zeros((), device=gt.device)
@@ -128,12 +146,18 @@ def compute_loss(
         # Confidence target is high when the corresponding branch error is low.
         tex_conf_target = torch.exp(-torch.abs(pred["speed_tex"] - gt)).detach()
         blur_conf_target = torch.exp(-torch.abs(pred["speed_blur"] - gt)).detach()
-        conf_reg = l1(pred["conf_tex"], tex_conf_target) + l1(pred["conf_blur"], blur_conf_target)
+        if branch == "temporal":
+            conf_reg = l1(pred["conf_tex"], tex_conf_target)
+        elif branch == "blur":
+            conf_reg = l1(pred["conf_blur"], blur_conf_target)
+        else:
+            conf_reg = l1(pred["conf_tex"], tex_conf_target) + l1(pred["conf_blur"], blur_conf_target)
         if "obs_quality" in pred:
             # Context quality is high when at least one visual branch has a
             # reliable observation; it is not supervised as a speed estimate.
             quality_target = torch.maximum(tex_conf_target, blur_conf_target)
-            conf_reg = conf_reg + l1(pred["obs_quality"], quality_target)
+            if branch == "joint":
+                conf_reg = conf_reg + l1(pred["obs_quality"], quality_target)
         total = total + conf_reg_weight * conf_reg
 
     return total, {
@@ -151,6 +175,7 @@ def run_train_epoch(
     device: torch.device,
     loss_weights: dict[str, float],
     epoch: int,
+    branch: str = "joint",
     profile_timing: bool = False,
 ) -> dict[str, float]:
     """Run one training epoch and return mean loss values."""
@@ -184,7 +209,7 @@ def run_train_epoch(
 
         start = time.perf_counter()
         pred = model(x_seq)
-        loss, loss_parts = compute_loss(pred, y_speed, loss_weights)
+        loss, loss_parts = compute_loss(pred, y_speed, loss_weights, branch=branch)
         if profile_timing:
             timing["train_forward_loss_s"] += elapsed_since(start, device)
 
@@ -220,6 +245,7 @@ def evaluate(
     model: nn.Module,
     loader: DataLoader,
     device: torch.device,
+    branch: str = "joint",
     profile_timing: bool = False,
 ) -> dict[str, float]:
     """Evaluate validation metrics."""
@@ -249,7 +275,8 @@ def evaluate(
         if profile_timing:
             timing["val_forward_s"] += elapsed_since(start, device)
 
-        preds.append(pred["speed"].detach().cpu().view(-1))
+        pred_key = {"joint": "speed", "temporal": "speed_tex", "blur": "speed_blur"}[branch]
+        preds.append(pred[pred_key].detach().cpu().view(-1))
         targets.append(y_speed.detach().cpu().view(-1))
         sync_if_cuda(device)
         wait_start = time.perf_counter()
@@ -338,20 +365,62 @@ def plot_training_history(history: list[dict[str, float]], output_path: Path) ->
     plt.close(fig)
 
 
+def configure_branch_training(model: nn.Module, branch: str) -> list[nn.Parameter]:
+    """Freeze modules outside the requested branch and return trainable params."""
+
+    if branch == "joint":
+        for param in model.parameters():
+            param.requires_grad = True
+        return [param for param in model.parameters() if param.requires_grad]
+
+    for param in model.parameters():
+        param.requires_grad = False
+
+    module_names = ["frame_encoder"]
+    if branch == "temporal":
+        module_names.extend(["texture_head", "texture_branch"])
+    elif branch == "blur":
+        module_names.extend(["blur_head", "blur_branch"])
+    else:
+        raise ValueError(f"Unsupported training branch: {branch}")
+
+    for name in module_names:
+        module = getattr(model, name, None)
+        if module is None:
+            continue
+        for param in module.parameters():
+            param.requires_grad = True
+
+    trainable = [param for param in model.parameters() if param.requires_grad]
+    if not trainable:
+        raise RuntimeError(f"No trainable parameters selected for branch '{branch}'")
+    return trainable
+
+
+def total_parameters(model: nn.Module) -> int:
+    """Count all model parameters, including frozen modules."""
+
+    return sum(param.numel() for param in model.parameters())
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Train RT-HBTNet")
     parser.add_argument("--config", default="configs/default.yaml")
-    parser.add_argument("--synthetic", action="store_true")
+    parser.add_argument(
+        "--dataset",
+        default=None,
+        choices=["video", "paired_blur", "flow_temporal", "gopro_blur", "mpi_sintel"],
+    )
+    parser.add_argument("--branch", default=None, choices=["joint", "blur", "temporal"])
+    parser.add_argument("--data-root", default=None)
+    parser.add_argument("--manifest", default=None)
+    parser.add_argument("--split", default=None)
     parser.add_argument("--labels", default="data/labels.csv")
     parser.add_argument("--video-root", default="data/videos")
     parser.add_argument("--epochs", type=int, default=None)
     parser.add_argument("--batch-size", type=int, default=None)
     parser.add_argument("--num-workers", type=int, default=None)
-    parser.add_argument("--synthetic-samples", type=int, default=None)
     parser.add_argument("--save-dir", default="runs/train")
-    parser.add_argument("--export-onnx", dest="export_onnx", action="store_true", default=None)
-    parser.add_argument("--no-export-onnx", dest="export_onnx", action="store_false")
-    parser.add_argument("--onnx-opset", type=int, default=None)
     parser.add_argument("--no-plots", dest="plots", action="store_false", default=True)
     parser.add_argument("--profile-timing", action="store_true", help="Print per-epoch timing breakdowns")
     args = parser.parse_args()
@@ -360,6 +429,11 @@ def main() -> None:
     config = load_config(config_path)
     train_cfg = config.setdefault("training", {})
     loss_cfg = train_cfg.setdefault("loss", {})
+    if args.dataset is None:
+        args.dataset = "video"
+    if args.branch is None:
+        args.branch = str(train_cfg.get("branch", "joint"))
+    train_cfg["branch"] = args.branch
 
     if args.epochs is not None:
         train_cfg["epochs"] = int(args.epochs)
@@ -367,13 +441,6 @@ def main() -> None:
         train_cfg["batch_size"] = int(args.batch_size)
     if args.num_workers is not None:
         train_cfg["num_workers"] = int(args.num_workers)
-    if args.synthetic_samples is not None:
-        config.setdefault("synthetic", {})["num_samples"] = int(args.synthetic_samples)
-    if args.export_onnx is not None:
-        train_cfg["export_onnx"] = bool(args.export_onnx)
-    if args.onnx_opset is not None:
-        train_cfg["onnx_opset"] = int(args.onnx_opset)
-
     seed = int(config.get("project", {}).get("seed", 42))
     set_seed(seed)
     device = choose_device(config)
@@ -400,8 +467,9 @@ def main() -> None:
     )
 
     model = build_model_from_config(config).to(device)
+    trainable_params = configure_branch_training(model, args.branch)
     optimizer = torch.optim.AdamW(
-        model.parameters(),
+        trainable_params,
         lr=float(train_cfg.get("lr", 1.0e-3)),
         weight_decay=float(train_cfg.get("weight_decay", 1.0e-5)),
     )
@@ -411,13 +479,12 @@ def main() -> None:
     save_config_copy(config, save_dir)
 
     print(f"device: {device}")
-    print(f"dataset: {'synthetic' if args.synthetic else 'video'} train={len(train_set)} val={len(val_set)}")
-    print(f"parameters: {count_parameters(model)}")
+    print(f"dataset: {args.dataset} train={len(train_set)} val={len(val_set)}")
+    print(f"branch: {args.branch}")
+    print(f"parameters: total={total_parameters(model)} trainable={sum(p.numel() for p in trainable_params)}")
 
     best_mae = float("inf")
     epochs = int(train_cfg.get("epochs", 20))
-    export_onnx = bool(train_cfg.get("export_onnx", True))
-    onnx_opset = int(train_cfg.get("onnx_opset", 17))
     history: list[dict[str, float]] = []
     history_path = save_dir / "history.csv"
     chart_path = save_dir / "training_curves.png"
@@ -431,12 +498,13 @@ def main() -> None:
             device,
             loss_cfg,
             epoch,
+            branch=args.branch,
             profile_timing=bool(args.profile_timing),
         )
         train_elapsed = elapsed_since(train_start, device)
 
         val_start = time.perf_counter()
-        val_metrics = evaluate(model, val_loader, device, profile_timing=bool(args.profile_timing))
+        val_metrics = evaluate(model, val_loader, device, branch=args.branch, profile_timing=bool(args.profile_timing))
         val_elapsed = elapsed_since(val_start, device)
         epoch_history = {
             "epoch": float(epoch),
@@ -448,7 +516,6 @@ def main() -> None:
             "train_time_s": train_elapsed,
             "val_time_s": val_elapsed,
             "artifact_time_s": 0.0,
-            "onnx_time_s": 0.0,
         }
         history.append(epoch_history)
         artifact_start = time.perf_counter()
@@ -480,18 +547,6 @@ def main() -> None:
         if val_metrics["mae"] < best_mae:
             best_mae = val_metrics["mae"]
             torch.save(checkpoint, save_dir / "best.pt")
-            if export_onnx:
-                onnx_start = time.perf_counter()
-                best_onnx = export_model_to_onnx(
-                    model,
-                    config,
-                    save_dir / "best.onnx",
-                    opset=onnx_opset,
-                    verify=False,
-                )
-                onnx_elapsed = elapsed_since(onnx_start, device)
-                epoch_history["onnx_time_s"] = onnx_elapsed
-                print(f"saved ONNX: {best_onnx}")
         epoch_history["epoch_time_s"] = elapsed_since(epoch_start, device)
         write_history_csv(history, history_path)
         if args.profile_timing:
@@ -500,8 +555,7 @@ def main() -> None:
                 f"epoch={epoch_history['epoch_time_s']:.2f}s "
                 f"train={train_elapsed:.2f}s "
                 f"val={val_elapsed:.2f}s "
-                f"artifacts={artifact_elapsed:.2f}s "
-                f"onnx={epoch_history['onnx_time_s']:.2f}s"
+                f"artifacts={artifact_elapsed:.2f}s"
             )
             print(
                 "train detail: "
@@ -516,20 +570,6 @@ def main() -> None:
                 f"h2d={val_metrics['val_h2d_s']:.2f}s "
                 f"forward={val_metrics['val_forward_s']:.2f}s"
             )
-
-    if export_onnx:
-        last_onnx_start = time.perf_counter()
-        last_onnx = export_model_to_onnx(
-            model,
-            config,
-            save_dir / "last.onnx",
-            opset=onnx_opset,
-            verify=False,
-        )
-        if args.profile_timing:
-            print(f"timing: final_onnx={elapsed_since(last_onnx_start, device):.2f}s")
-        print(f"saved ONNX: {last_onnx}")
-
 
 if __name__ == "__main__":
     main()

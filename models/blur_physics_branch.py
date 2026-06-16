@@ -136,43 +136,9 @@ class BlurPhysicsDescriptor(nn.Module):
         return torch.cat([energy, anisotropy], dim=1)
 
     def _fft_band_features(self, x_frame: torch.Tensor) -> torch.Tensor:
-        if torch.onnx.is_in_onnx_export():
-            return self._dft_band_features_for_export(x_frame)
-
         fft_input = x_frame.float()
         spectrum = torch.fft.rfft2(fft_input, norm="ortho")
         power = spectrum.real.square() + spectrum.imag.square()
-        return self._power_band_features(power, x_frame)
-
-    def _dft_band_features_for_export(self, x_frame: torch.Tensor) -> torch.Tensor:
-        dft_input = x_frame.float()
-        height = int(x_frame.shape[-2])
-        width = int(x_frame.shape[-1])
-        freq_width = width // 2 + 1
-        dtype = dft_input.dtype
-        device = x_frame.device
-
-        row_idx = torch.arange(height, device=device, dtype=dtype)
-        col_idx = torch.arange(width, device=device, dtype=dtype)
-        freq_y = torch.arange(height, device=device, dtype=dtype)
-        freq_x = torch.arange(freq_width, device=device, dtype=dtype)
-        angle_x = -6.283185307179586 * col_idx[:, None] * freq_x[None, :] / float(width)
-        angle_y = -6.283185307179586 * row_idx[:, None] * freq_y[None, :] / float(height)
-        cos_x = torch.cos(angle_x)
-        sin_x = torch.sin(angle_x)
-        cos_y = torch.cos(angle_y)
-        sin_y = torch.sin(angle_y)
-
-        real_x = torch.matmul(dft_input, cos_x)
-        imag_x = torch.matmul(dft_input, sin_x)
-        real_x = real_x.transpose(-2, -1)
-        imag_x = imag_x.transpose(-2, -1)
-
-        real = torch.matmul(real_x, cos_y) - torch.matmul(imag_x, sin_y)
-        imag = torch.matmul(real_x, sin_y) + torch.matmul(imag_x, cos_y)
-        real = real.transpose(-2, -1)
-        imag = imag.transpose(-2, -1)
-        power = (real.square() + imag.square()) / float(height * width)
         return self._power_band_features(power, x_frame)
 
     def _power_band_features(self, power: torch.Tensor, x_frame: torch.Tensor) -> torch.Tensor:
