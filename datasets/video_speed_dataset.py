@@ -74,37 +74,26 @@ class VideoSpeedDataset(Dataset):
         )
         self.roi_index = int(roi_index)
         self.records = self._read_labels(self.labels_csv)
+        self._sample_cache: dict[int, tuple[torch.Tensor, torch.Tensor]] = {}
 
     def __len__(self) -> int:
         return len(self.records)
 
     def __getitem__(self, index: int) -> tuple[torch.Tensor, torch.Tensor]:
-        record = self.records[int(index)]
+        index = int(index)
+        cached = self._sample_cache.get(index)
+        if cached is not None:
+            return cached
+
+        record = self.records[index]
         video_path = self._resolve_video_path(record["video_path"])
         frame_indices = self._sample_frame_indices(record["start_frame"], record["end_frame"])
 
-        cap = cv2.VideoCapture(str(video_path))
-        if not cap.isOpened():
-            raise FileNotFoundError(f"Could not open video for dataset sample {index}: {video_path}")
+        sampled_frames = self._load_sample_frames(video_path, frame_indices)
 
-        raw_frames: list[np.ndarray] = []
-        try:
-            for frame_idx in frame_indices:
-                cap.set(cv2.CAP_PROP_POS_FRAMES, int(frame_idx))
-                ok, frame = cap.read()
-                if not ok or frame is None:
-                    raise RuntimeError(
-                        f"Could not read frame {frame_idx} from video '{video_path}' "
-                        f"for dataset sample {index}"
-                    )
-
-                raw_frames.append(frame)
-        finally:
-            cap.release()
-
-        sample_config = self._sample_roi_config(raw_frames)
+        sample_config = self._sample_roi_config(sampled_frames)
         frames_chw: list[np.ndarray] = []
-        for frame in raw_frames:
+        for frame in sampled_frames:
             rois = extract_rois(frame, sample_config)
             if not rois:
                 raise RuntimeError(f"No ROIs extracted from video '{video_path}' for dataset sample {index}")
@@ -119,6 +108,7 @@ class VideoSpeedDataset(Dataset):
 
         x_seq = torch.from_numpy(stack_sequence(frames_chw)).float()  # T,C,H,W
         y_speed = torch.tensor([float(record["speed_mps"])], dtype=torch.float32)  # 1
+        self._sample_cache[index] = (x_seq, y_speed)
         return x_seq, y_speed
 
     def _sample_roi_config(self, raw_frames: list[np.ndarray]) -> dict[str, Any]:
@@ -139,6 +129,30 @@ class VideoSpeedDataset(Dataset):
         if self.video_root is not None:
             return self.video_root / path
         return self.labels_csv.parent / path
+
+    @staticmethod
+    def _load_sample_frames(video_path: Path, frame_indices: list[int]) -> list[np.ndarray]:
+        if not frame_indices:
+            raise ValueError("frame_indices must contain at least one frame")
+
+        cap = cv2.VideoCapture(str(video_path))
+        if not cap.isOpened():
+            raise FileNotFoundError(f"Could not open video: {video_path}")
+
+        frames: list[np.ndarray] = []
+        try:
+            for frame_idx in frame_indices:
+                cap.set(cv2.CAP_PROP_POS_FRAMES, int(frame_idx))
+                ok, frame = cap.read()
+                if not ok or frame is None:
+                    raise RuntimeError(f"Could not read frame {frame_idx} from video '{video_path}'")
+                frames.append(frame)
+        finally:
+            cap.release()
+
+        if not frames:
+            raise RuntimeError(f"Could not decode any frames from video: {video_path}")
+        return frames
 
     def _sample_frame_indices(self, start_frame: int, end_frame: int) -> list[int]:
         if end_frame < start_frame:

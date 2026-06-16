@@ -4,14 +4,15 @@ import argparse
 import csv
 import random
 import time
+from collections.abc import Sized
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import numpy as np
 import torch
 import yaml
 from torch import nn
-from torch.utils.data import DataLoader, Dataset, random_split
+from torch.utils.data import DataLoader, Dataset, Subset, random_split
 from tqdm import tqdm
 
 try:
@@ -88,7 +89,7 @@ def build_dataset(args: argparse.Namespace, config: dict[str, Any]) -> Dataset:
     )
 
 
-def split_dataset(dataset: Dataset, seed: int) -> tuple[Dataset, Dataset]:
+def split_dataset(dataset: Sized, seed: int) -> tuple[Subset[Any], Subset[Any]]:
     """Split one dataset into train/validation subsets."""
 
     total = len(dataset)
@@ -99,7 +100,8 @@ def split_dataset(dataset: Dataset, seed: int) -> tuple[Dataset, Dataset]:
     if train_count < 1:
         train_count, val_count = 1, total - 1
     generator = torch.Generator().manual_seed(int(seed))
-    return random_split(dataset, [train_count, val_count], generator=generator)
+    train_set, val_set = random_split(cast(Dataset[Any], dataset), [train_count, val_count], generator=generator)
+    return train_set, val_set
 
 
 def compute_loss(
@@ -376,7 +378,7 @@ def main() -> None:
     set_seed(seed)
     device = choose_device(config)
 
-    dataset = build_dataset(args, config)
+    dataset = cast(Sized, build_dataset(args, config))
     train_set, val_set = split_dataset(dataset, seed)
     batch_size = int(train_cfg.get("batch_size", 8))
     num_workers = int(train_cfg.get("num_workers", 2))
@@ -385,6 +387,7 @@ def main() -> None:
         batch_size=batch_size,
         shuffle=True,
         num_workers=num_workers,
+        persistent_workers=num_workers > 0,
         pin_memory=device.type == "cuda",
     )
     val_loader = DataLoader(
@@ -392,6 +395,7 @@ def main() -> None:
         batch_size=batch_size,
         shuffle=False,
         num_workers=num_workers,
+        persistent_workers=num_workers > 0,
         pin_memory=device.type == "cuda",
     )
 
