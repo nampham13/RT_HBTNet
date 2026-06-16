@@ -13,7 +13,7 @@ Because no public dataset jointly provides conveyor video, blur cues, temporal m
 
 ## 🏗️ Architecture
 
-![Architecture](assets/architecture.png)
+![Architecture](assets/architecture.html)
 
 Architecture source: [architect.tex](architect.tex)
 
