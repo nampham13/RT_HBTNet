@@ -1,50 +1,42 @@
 # RT-HBTNet: Real-Time Hybrid Blur-Texture Network
 
-RT-HBTNet is a research prototype for conveyor belt speed estimation using
-monocular video only. It is designed as a compact experimental baseline for
-low-light and motion-blur conditions, not as a production accuracy guarantee.
+[![Paper](https://img.shields.io/badge/Paper-arXiv-red)](#)
+[![License](https://img.shields.io/badge/License-Apache--2.0-blue)](LICENSE)
 
-The system does not use sensors, encoders, lasers, or heavy optical-flow models
-as the main method.
+> Monocular video speed estimation with separate blur-physics and temporal-texture branches for low-light, motion-blur conveyor scenarios.
 
-## Core Idea
+## 📌 Abstract
 
-RT-HBTNet combines two lightweight visual branches:
+RT-HBTNet is a research prototype for estimating conveyor belt speed from monocular video without sensors, encoders, lasers, or heavy optical-flow inference at runtime. The model combines a Temporal Texture Branch, a Blur Physics Branch, a Context Encoder, confidence-aware fusion, and temporal stabilization.
 
-- Temporal Texture Branch learns speed from temporal texture dynamics across a
-  sequence of conveyor ROI frames. It uses lightweight Temporal Shift Modules,
-  decomposed `(2+1)D` convolutions, and multi-scale ROI pooling so local texture
-  motion remains visible across changes in apparent belt scale.
-- Blur Physics Branch learns speed from motion-blur-induced visual signatures in
-  a key ROI frame. It combines learned CNN features with fixed physics-inspired
-  descriptors: Sobel edge attenuation, radial FFT frequency-band statistics, and
-  horizontal, vertical, and diagonal directional blur-kernel responses. This is
-  still a learned latent cue, not an explicit blur-length measurement.
-- Context Encoder estimates observation quality and branch reliability context.
-  It does not estimate speed; it helps fusion decide whether the Temporal
-  Texture Branch or Blur Physics Branch should be trusted more.
-- Cross-attention fusion lets texture features query blur features and blur
-  features query texture features. The resulting attention bias is combined with
-  branch confidence and context bias before producing the final texture-vs-blur
-  fusion weights.
-- EMA or Kalman stabilization smooths the final speed estimate for display.
+Because no public dataset jointly provides conveyor video, blur cues, temporal motion, calibrated speed, and ground truth suitable for fair comparison, the data pipeline is designed around dataset families rather than a single fixed benchmark. Blur cues can be pretrained from paired degraded/reference image data, temporal cues can be pretrained from frame+flow data, and final metric speed should be calibrated or fine-tuned with site-specific labeled video.
 
-Input tensors use shape `B,T,C,H,W`.
+## 🏗️ Architecture
 
-## Repository Layout
+![Architecture](assets/architecture.png)
 
-```text
-configs/      YAML configuration files
-datasets/     Synthetic and labeled-video datasets
-models/       RT-HBTNet branches, fusion blocks, and model factory
-scripts/      Training, inference, ONNX export, benchmark, and demo utilities
-tests/        Pytest coverage for ROI, filters, factories, model shapes, and export
-utils/        Preprocessing, ROI detection, metrics, calibration, visualization
-```
+Architecture source: [architect.tex](architect.tex)
 
-## Installation
+## 🚀 Getting Started
+
+### Requirements
+
+- Python 3.8+
+- PyTorch
+- torchvision
+- OpenCV
+- NumPy
+- PyYAML
+- tqdm
+- pandas
+- matplotlib
+- pytest
+
+### Installation
 
 ```bash
+git clone https://github.com/user/rt_hbtnet
+cd rt_hbtnet
 pip install -r requirements.txt
 ```
 
@@ -56,208 +48,136 @@ python -m venv .venv
 pip install -r requirements.txt
 ```
 
-## Quick Start
+## 📂 Dataset
 
-Generate a small synthetic conveyor video and matching `labels.csv`:
+Recommended layout:
 
-```bash
-python scripts/demo_synthetic_video.py --output data/synthetic_conveyor.mp4 --speed 2.0 --blur --low-light
+```text
+data/
+  raw/
+    paired_blur/
+      train/<sequence>/blur/*.png
+      train/<sequence>/sharp/*.png
+      test/<sequence>/blur/*.png
+      test/<sequence>/sharp/*.png
+    flow_temporal/
+      training/final/<scene>/frame_*.png
+      training/flow/<scene>/frame_*.flo
+    site_speed/
+      videos/*.mp4
+  manifests/
+    site_speed/labels.csv
+    paired_blur/train.csv
+    flow_temporal/train.csv
+  processed/
+    paired_blur/
+    flow_temporal/
+  splits/
+    paired_blur/
+    flow_temporal/
+    site_speed/
 ```
 
-Run a short synthetic training smoke test:
-
-```bash
-python scripts/train.py --config configs/default.yaml --synthetic --synthetic-samples 64 --epochs 1 --batch-size 2 --num-workers 0 --save-dir runs/smoke_train
-```
-
-Run inference on the generated video without opening a display window:
-
-```bash
-python scripts/infer_video.py --config configs/default.yaml --weights runs/smoke_train/best.pt --video data/synthetic_conveyor.mp4 --no-display --save-output runs/smoke_train/demo_output.mp4
-```
-
-## Train With Synthetic Data
-
-Synthetic training lets the full pipeline run without real conveyor data:
-
-```bash
-python scripts/train.py --config configs/default.yaml --synthetic
-```
-
-For a short smoke run on Windows or CPU-only machines:
-
-```bash
-python scripts/train.py --config configs/default.yaml --synthetic --synthetic-samples 64 --epochs 1 --batch-size 2 --num-workers 0 --save-dir runs/smoke_train
-```
-
-Checkpoints are saved to `runs/train` by default:
-
-- `best.onnx` and `last.onnx` for deployment/inference runtimes that consume ONNX.
-- `best.pt` and `last.pt` PyTorch checkpoints for training state, debugging, or
-  re-exporting.
-- `config.yaml`
-- `history.csv` with per-epoch loss and validation metrics.
-- `training_curves.png` with loss, MAE, RMSE, and MAPE curves.
-
-Disable ONNX export during training with:
-
-```bash
-python scripts/train.py --config configs/default.yaml --synthetic --no-export-onnx
-```
-
-Disable training curve plots with:
-
-```bash
-python scripts/train.py --config configs/default.yaml --synthetic --no-plots
-```
-
-Export an existing PyTorch checkpoint manually with:
-
-```bash
-python scripts/export_onnx.py --config configs/default.yaml --weights runs/train/best.pt --output runs/train/best.onnx
-```
-
-The ONNX graph keeps batch size dynamic, while sequence length and ROI input
-size are fixed from the config used during export. During PyTorch
-training/inference the blur physics descriptor uses `torch.fft.rfft2`; during
-ONNX export it switches to an equivalent fixed-size DFT path built from
-matrix multiplications so export remains compatible with opset 17.
-
-## Run Inference
-
-```bash
-python scripts/infer_video.py --config configs/default.yaml --weights runs/train/best.pt --video data/synthetic_conveyor.mp4
-```
-
-Optional fixed ROI override:
-
-```bash
-python scripts/infer_video.py --config configs/default.yaml --weights runs/train/best.pt --video data/synthetic_conveyor.mp4 --roi "100,100,400,160"
-```
-
-Use webcam input:
-
-```bash
-python scripts/infer_video.py --config configs/default.yaml --weights runs/train/best.pt --camera 0
-```
-
-Run headless and save the annotated dashboard video:
-
-```bash
-python scripts/infer_video.py --config configs/default.yaml --weights runs/train/best.pt --video data/synthetic_conveyor.mp4 --no-display --save-output runs/infer/output.mp4
-```
-
-Calibrate the model output against a known belt speed. During the calibration
-window, raw model predictions are collected and a scale factor is saved to
-`calibration.json` by default:
-
-```bash
-python scripts/infer_video.py --config configs/default.yaml --weights runs/train/best.pt --video data/synthetic_conveyor.mp4 --known-speed 2.0 --calibrate-seconds 10 --calibration calibration.json
-```
-
-Later inference runs load the saved calibration file automatically when
-`--known-speed` is omitted.
-
-## Benchmark
-
-```bash
-python scripts/benchmark.py --config configs/default.yaml
-```
-
-The benchmark reports device, input shape, parameter count, average latency,
-and FPS.
-
-Benchmark with a trained checkpoint:
-
-```bash
-python scripts/benchmark.py --config configs/default.yaml --weights runs/train/best.pt --batch-size 1 --sequence-length 64
-```
-
-## Dataset Format
-
-For real videos, create `labels.csv` with:
+For metric speed training, create a labeled-video CSV:
 
 ```csv
 video_path,start_frame,end_frame,speed_mps
-videos/belt_001.mp4,0,300,1.25
-videos/belt_002.mp4,50,350,2.10
-```
-
-Then train with:
-
-```bash
-python scripts/train.py --config configs/default.yaml --labels data/labels.csv --video-root data/videos
+belt_001.mp4,0,300,1.25
+belt_002.mp4,50,350,2.10
 ```
 
 Relative `video_path` values are resolved through `--video-root`.
 
-The labeled-video dataset samples `data.sequence_length` frames evenly from
-`start_frame` to `end_frame`. Each sample is preprocessed into ROI tensors with
-shape `T,C,H,W`; the DataLoader adds the batch dimension used by the model.
+Supported dataset families:
 
-## ROI Config
+- `video`: site-specific labeled conveyor videos with `speed_mps`.
+- `paired_blur`: generic paired degraded/reference images for blur-branch pretraining.
+- `flow_temporal`: generic frame sequence + dense flow data for temporal-branch pretraining.
+- `gopro_blur`: convenience preset for GOPRO-style paired blur data.
+- `mpi_sintel`: convenience preset for MPI Sintel-style frame+flow data.
 
-ROI settings live in `configs/default.yaml`:
+## 🏋️ Training
 
-```yaml
-roi:
-  mode: "auto_motion"
-  rois: []
-  auto_motion:
-    warmup_frames: 45
-    max_rois: 1
-    fallback: "full"
-    motion_threshold: 18.0
-    score_threshold: 20.0
-    min_area_ratio: 0.02
-    max_area_ratio: 0.85
-  resize_width: 128
-  resize_height: 64
+Train with site-specific labeled video:
+
+```bash
+python scripts/train.py --config configs/default.yaml --dataset video --labels data/manifests/site_speed/labels.csv --video-root data/raw/site_speed/videos
 ```
 
-With `auto_motion`, inference reads a short warm-up clip, detects moving
-texture regions with OpenCV frame-difference and Sobel texture energy, then
-locks the detected boxes for the rest of the run. If detection fails, it falls
-back to the full frame by default. For manual ROIs, set `mode: "fixed"` and use
-`rois: [[x, y, w, h]]` in source-frame pixels, or pass `--roi "x,y,w,h"` on the
-CLI. Multiple ROIs are supported at inference time; RT-HBTNet runs each ROI and
-uses median speed voting with average confidence for display.
+Pretrain only the blur branch:
 
-## Configuration Notes
+```bash
+python scripts/train.py --config configs/default.yaml --dataset paired_blur --branch blur --data-root data/raw/paired_blur --save-dir runs/pretrain_blur
+```
 
-- `project.device: "auto"` chooses CUDA when available, otherwise CPU.
-- `data.sequence_length` controls the temporal window length.
-- `data.grayscale: true` and `model.in_channels: 1` are the default path.
-- `training.export_onnx: true` exports `best.onnx` during training and
-  `last.onnx` at the end.
-- `stabilization.type` supports `ema` and `kalman` through the stabilizer
-  factory.
+Pretrain only the temporal branch:
 
-## Testing
+```bash
+python scripts/train.py --config configs/default.yaml --dataset flow_temporal --branch temporal --data-root data/raw/flow_temporal --save-dir runs/pretrain_temporal
+```
 
-Run the test suite with:
+Checkpoints and logs are written to `runs/train` by default:
+
+- `best.pt`
+- `last.pt`
+- `config.yaml`
+- `history.csv`
+- `training_curves.png`
+
+## 🔎 Inference
+
+Run inference on a video:
+
+```bash
+python scripts/infer_video.py --config configs/default.yaml --weights runs/train/best.pt --video data/raw/site_speed/videos/belt_001.mp4
+```
+
+Use a fixed ROI:
+
+```bash
+python scripts/infer_video.py --config configs/default.yaml --weights runs/train/best.pt --video data/raw/site_speed/videos/belt_001.mp4 --roi "100,100,400,160"
+```
+
+Run headless and save annotated output:
+
+```bash
+python scripts/infer_video.py --config configs/default.yaml --weights runs/train/best.pt --video data/raw/site_speed/videos/belt_001.mp4 --no-display --save-output runs/infer/output.mp4
+```
+
+## 📊 Results
+
+| Method | MAE (m/s) | RMSE | MAPE (%) |
+|--------|-----------|------|----------|
+| RT-HBTNet | TBD | TBD | TBD |
+
+Report site-specific calibration settings, ROI policy, camera FPS, and train/validation split when filling this table.
+
+## 📁 Project Structure
+
+```text
+configs/      YAML configuration files
+datasets/     Dataset adapters for video, paired blur, and frame+flow data
+models/       RT-HBTNet branches, fusion blocks, and model factory
+scripts/      Training, inference, and benchmark entry points
+tests/        Pytest coverage for datasets, ROI, filters, fusion, and model shapes
+utils/        Preprocessing, ROI detection, metrics, calibration, and visualization
+architect.tex Architecture diagram source
+```
+
+## 🧪 Testing
 
 ```bash
 pytest
 ```
 
-For a narrower smoke check:
+Focused smoke check:
 
 ```bash
 pytest tests/test_model_shapes.py tests/test_factories.py
 ```
 
-## Limitations
+## ⚠️ Limitations
 
-This is a prototype. Do not treat its output as production-grade measurement
-without validation against calibrated ground truth.
+This is a research prototype. Do not treat its output as production-grade measurement without validation against calibrated ground truth.
 
-CV-only monocular video cannot reliably estimate absolute speed if the belt has
-no useful visual texture, repeated ambiguous patterns, or no motion-induced
-signal. For metric speed, the system needs known reference speed data or
-pixel-to-meter calibration. Camera position, lens, zoom, and ROI should remain
-fixed after calibration.
-
-Lighting, exposure, rolling shutter, belt material, camera angle, and blur level
-can all shift model behavior. Real deployment requires site-specific data,
-calibration, and validation.
+CV-only monocular video cannot reliably estimate absolute speed if the belt has no useful visual texture, repeated ambiguous patterns, or no motion-induced signal. Metric speed requires known reference-speed data or pixel-to-meter calibration, and camera position, lens, zoom, and ROI should remain fixed after calibration.

@@ -6,7 +6,7 @@
 \usetikzlibrary{arrows.meta,positioning,fit,backgrounds,calc}
 
 % =========================================================
-% RT-HBTNet architecture figure - revised architecture only
+% RT-HBTNet architecture figure - branch-pretraining data ingestion
 % =========================================================
 
 % -------------------------
@@ -79,6 +79,40 @@
 \begin{tikzpicture}[x=1cm,y=1cm]
 
 % =========================================================
+% Branch-pretraining data ingestion
+% =========================================================
+\node[graynd=2.45cm] (data_layout) at (-0.35,5.95)
+  {Data file\\architecture\\\texttt{raw/ manifests/}\\\texttt{processed/ splits/}};
+
+\node[ambernd=2.8cm] (paired_blur_raw) at (3.25,6.75)
+  {Paired blur data\\degraded/reference\\e.g. GOPRO};
+
+\node[bluend=2.8cm] (frame_flow_raw) at (3.25,5.15)
+  {Frame+flow data\\clips + motion GT\\e.g. Sintel};
+
+\node[graynd=2.55cm] (manifest_build) at (6.85,5.95)
+  {Manifest\\normalization\\split registry};
+
+\node[ambernd=2.75cm] (blur_target) at (10.35,6.75)
+  {Blur pretrain\\proxy target\\$y^{blur}$};
+
+\node[bluend=2.75cm] (temporal_target) at (10.35,5.15)
+  {Temporal pretrain\\flow proxy\\$y^{tex}$};
+
+\draw[arr, color=cGrayB] (data_layout.east) -- ++(0.40,0) |- (paired_blur_raw.west);
+\draw[arr, color=cGrayB] (data_layout.east) -- ++(0.40,0) |- (frame_flow_raw.west);
+\draw[arr, color=cAmberB] (paired_blur_raw.east) -- ++(0.35,0) |- (manifest_build.west);
+\draw[arr, color=cBlueB] (frame_flow_raw.east) -- ++(0.35,0) |- (manifest_build.west);
+\draw[arr, color=cAmberB] (manifest_build.east) -- ++(0.35,0) |- (blur_target.west);
+\draw[arr, color=cBlueB] (manifest_build.east) -- ++(0.35,0) |- (temporal_target.west);
+
+\begin{scope}[on background layer]
+  \node[cont, fill=cGrayF, draw=cGrayB,
+        fit=(data_layout)(paired_blur_raw)(frame_flow_raw)(manifest_build)(blur_target)(temporal_target),
+        label={[lab, color=cGrayB]above:General Branch Pretraining Ingestion}] (dataBox) {};
+\end{scope}
+
+% =========================================================
 % Input, ROI, shared descriptor and encoder
 % =========================================================
 \node[graynd=1.85cm] (video) at (-0.35,0)
@@ -131,6 +165,7 @@
 \draw[arr, color=cBlueB] (tex_head.east) -- (tcn.west);
 \draw[arr, color=cBlueB] (tcn.east) -- ++(0.45,0) |- (spd_tex.west);
 \draw[arr, color=cBlueB] (tcn.east) -- ++(0.45,0) |- (conf_tex.west);
+\draw[dasharr, color=cBlueB] (temporal_target.south) -- ++(0,-1.10) -| (tex_head.north);
 
 % =========================================================
 % Blur Physics Branch
@@ -151,6 +186,7 @@
 \draw[arr, color=cAmberB] (blur_head.east) -- (blur_latent.west);
 \draw[arr, color=cAmberB] (blur_latent.east) -- ++(0.45,0) |- (spd_blur.west);
 \draw[arr, color=cAmberB] (blur_latent.east) -- ++(0.45,0) |- (conf_blur.west);
+\draw[dasharr, color=cAmberB] (blur_target.south) -- ++(0,-8.60) -| (blur_head.north);
 
 % =========================================================
 % Containers behind top branches

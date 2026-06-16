@@ -7,4 +7,3 @@ tqdm
 pandas
 matplotlib
 pytest
-onnx

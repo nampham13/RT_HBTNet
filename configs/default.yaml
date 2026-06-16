@@ -4,12 +4,45 @@ project:
   device: "auto"
 
 data:
+  dataset: "video"
   image_size:
     height: 64
     width: 128
   sequence_length: 64
   grayscale: true
   normalize: true
+  pixels_per_meter: 64.0
+  datasets:
+    video:
+      labels: "data/manifests/site_speed/labels.csv"
+      root: "data/raw/site_speed/videos"
+    paired_blur:
+      root: "data/raw/paired_blur"
+      split: "train"
+      manifest: null
+      blur_dir_name: "blur"
+      sharp_dir_name: "sharp"
+      target_scale: 10.0
+    flow_temporal:
+      root: "data/raw/flow_temporal"
+      split: "training"
+      image_subdir: "final"
+      flow_subdir: "flow"
+      stride: 32
+      target_unit: "flow_px_per_frame"
+    presets:
+      gopro_blur:
+        family: "paired_blur"
+        root: "data/raw/GOPRO_Large"
+        split: "train"
+        blur_dir_name: "blur"
+        sharp_dir_name: "sharp"
+      mpi_sintel:
+        family: "flow_temporal"
+        root: "data/raw/MPI-Sintel"
+        split: "training"
+        image_subdir: "final"
+        flow_subdir: "flow"
   clahe:
     enabled: true
     clip_limit: 2.0
@@ -72,13 +105,12 @@ stabilization:
     measurement_noise: 0.1
 
 training:
+  branch: "joint"
   batch_size: 8
   epochs: 20
   lr: 0.001
   weight_decay: 0.00001
   num_workers: 2
-  export_onnx: true
-  onnx_opset: 17
   loss:
     main_weight: 1.0
     tex_weight: 0.5
