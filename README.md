@@ -13,9 +13,9 @@ Because no public dataset jointly provides conveyor video, blur cues, temporal m
 
 ## 🏗️ Architecture
 
-![Architecture](assets/architecture.html)
+![Architecture](assets/architecture.png)
 
-Architecture source: [architect.tex](architect.tex)
+Architecture source: [render_architecture.py](d:/accv26/rt_hbtnet/scripts/render_architecture.py)
 
 ## 🚀 Getting Started
 
@@ -93,8 +93,6 @@ Supported dataset families:
 - `video`: site-specific labeled conveyor videos with `speed_mps`.
 - `paired_blur`: generic paired degraded/reference images for blur-branch pretraining.
 - `flow_temporal`: generic frame sequence + dense flow data for temporal-branch pretraining.
-- `gopro_blur`: convenience preset for GOPRO-style paired blur data.
-- `mpi_sintel`: convenience preset for MPI Sintel-style frame+flow data.
 
 ## 🏋️ Training
 
