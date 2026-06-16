@@ -9,14 +9,15 @@ from PIL import Image, ImageDraw, ImageFont
 ROOT = Path(__file__).resolve().parents[1]
 OUT = ROOT / "assets" / "architecture.png"
 
-W, H = 1600, 760
+W, H = 1400, 760
 
 COLORS = {
+    "page_border": "#1f2937",
     "ink": "#111827",
-    "muted": "#374151",
     "gray_fill": "#f1f0ea",
     "gray": "#77746c",
-    "blue_fill": "#e8f3ff",
+    "gray_arrow": "#6f7169",
+    "blue_fill": "#eaf4ff",
     "blue_node": "#cfe5ff",
     "blue": "#256fc2",
     "amber_fill": "#fff6de",
@@ -36,36 +37,45 @@ COLORS = {
 }
 
 
-def font(size: int, bold: bool = False) -> ImageFont.ImageFont:
+def load_font(size: int, bold: bool = False) -> ImageFont.ImageFont:
     candidates = [
         "C:/Windows/Fonts/arialbd.ttf" if bold else "C:/Windows/Fonts/arial.ttf",
-        "C:/Windows/Fonts/timesbd.ttf" if bold else "C:/Windows/Fonts/times.ttf",
+        "C:/Windows/Fonts/segoeuib.ttf" if bold else "C:/Windows/Fonts/segoeui.ttf",
         "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf" if bold else "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
     ]
     for path in candidates:
         try:
-            return ImageFont.truetype(path, size)
+            return ImageFont.truetype(path, size=size)
         except OSError:
-            pass
+            continue
     return ImageFont.load_default()
 
 
-F_LABEL = font(17, True)
-F_NODE = font(15, True)
-F_TEXT = font(13)
-F_MATH = font(12, True)
+F_LABEL = load_font(16, True)
+F_NODE = load_font(14, True)
+F_TEXT = load_font(12)
+F_TINY = load_font(11)
 
 
-def text_center(draw: ImageDraw.ImageDraw, box: tuple[int, int, int, int], lines: list[tuple[str, ImageFont.ImageFont, str]]) -> None:
+def center_multiline(
+    draw: ImageDraw.ImageDraw,
+    box: tuple[int, int, int, int],
+    lines: list[tuple[str, ImageFont.ImageFont, str]],
+    gap: int = 2,
+) -> None:
     x1, y1, x2, y2 = box
-    heights = [draw.textbbox((0, 0), text, font=fnt)[3] for text, fnt, _ in lines]
-    total = sum(heights) + 2 * (len(lines) - 1)
-    y = y1 + (y2 - y1 - total) / 2 - 1
-    for (text, fnt, color), h in zip(lines, heights):
-        bbox = draw.textbbox((0, 0), text, font=fnt)
-        x = x1 + (x2 - x1 - (bbox[2] - bbox[0])) / 2
+    heights = []
+    widths = []
+    for text, fnt, _ in lines:
+        left, top, right, bottom = draw.textbbox((0, 0), text, font=fnt)
+        widths.append(right - left)
+        heights.append(bottom - top)
+    total_h = sum(heights) + gap * (len(lines) - 1)
+    y = y1 + (y2 - y1 - total_h) / 2 - 1
+    for (text, fnt, color), width, height in zip(lines, widths, heights):
+        x = x1 + (x2 - x1 - width) / 2
         draw.text((x, y), text, font=fnt, fill=color)
-        y += h + 2
+        y += height + gap
 
 
 def node(
@@ -75,148 +85,160 @@ def node(
     stroke: str,
     lines: list[str],
     *,
-    width: int = 2,
+    radius: int = 7,
+    title_count: int = 1,
 ) -> None:
-    draw.rounded_rectangle(box, radius=8, fill=fill, outline=stroke, width=width)
-    styled = []
+    draw.rounded_rectangle(box, radius=radius, fill=fill, outline=stroke, width=2)
+    styled: list[tuple[str, ImageFont.ImageFont, str]] = []
     for i, line in enumerate(lines):
-        styled.append((line, F_NODE if i == 0 else F_TEXT, COLORS["ink"]))
-    text_center(draw, box, styled)
+        styled.append((line, F_NODE if i < title_count else F_TEXT, COLORS["ink"]))
+    center_multiline(draw, box, styled)
 
 
-def dashed_box(
+def label(draw: ImageDraw.ImageDraw, x: int, y: int, text: str, color: str) -> None:
+    left, top, right, bottom = draw.textbbox((0, 0), text, font=F_LABEL)
+    draw.text((x - (right - left) / 2, y), text, font=F_LABEL, fill=color)
+
+
+def dashed_round_rect(
     draw: ImageDraw.ImageDraw,
     box: tuple[int, int, int, int],
     fill: str,
     stroke: str,
-    label: str,
-    label_pos: str = "top",
+    *,
+    radius: int = 14,
+    dash: int = 8,
+    gap: int = 7,
 ) -> None:
-    draw.rounded_rectangle(box, radius=16, fill=fill)
     x1, y1, x2, y2 = box
-    dash = 9
-    gap = 7
-    for a, b in [((x1 + 14, y1), (x2 - 14, y1)), ((x1 + 14, y2), (x2 - 14, y2)), ((x1, y1 + 14), (x1, y2 - 14)), ((x2, y1 + 14), (x2, y2 - 14))]:
-        dashed_line(draw, a, b, stroke, 2, dash, gap)
-    for arc_box, start, end in [
-        ((x1, y1, x1 + 28, y1 + 28), 180, 270),
-        ((x2 - 28, y1, x2, y1 + 28), 270, 360),
-        ((x1, y2 - 28, x1 + 28, y2), 90, 180),
-        ((x2 - 28, y2 - 28, x2, y2), 0, 90),
-    ]:
-        draw.arc(arc_box, start=start, end=end, fill=stroke, width=2)
-    label_w = draw.textbbox((0, 0), label, font=F_LABEL)[2]
-    label_x = x1 + (x2 - x1 - label_w) / 2
-    label_y = y1 - 24 if label_pos == "top" else y2 + 8
-    draw.text((label_x, label_y), label, font=F_LABEL, fill=stroke)
+    draw.rounded_rectangle(box, radius=radius, fill=fill)
+    dashed_line(draw, (x1 + radius, y1), (x2 - radius, y1), stroke, dash=dash, gap=gap)
+    dashed_line(draw, (x1 + radius, y2), (x2 - radius, y2), stroke, dash=dash, gap=gap)
+    dashed_line(draw, (x1, y1 + radius), (x1, y2 - radius), stroke, dash=dash, gap=gap)
+    dashed_line(draw, (x2, y1 + radius), (x2, y2 - radius), stroke, dash=dash, gap=gap)
+    draw.arc((x1, y1, x1 + 2 * radius, y1 + 2 * radius), 180, 270, fill=stroke, width=2)
+    draw.arc((x2 - 2 * radius, y1, x2, y1 + 2 * radius), 270, 360, fill=stroke, width=2)
+    draw.arc((x1, y2 - 2 * radius, x1 + 2 * radius, y2), 90, 180, fill=stroke, width=2)
+    draw.arc((x2 - 2 * radius, y2 - 2 * radius, x2, y2), 0, 90, fill=stroke, width=2)
 
 
-def dashed_line(draw: ImageDraw.ImageDraw, a: tuple[int, int], b: tuple[int, int], color: str, width: int = 2, dash: int = 9, gap: int = 7) -> None:
-    ax, ay = a
-    bx, by = b
-    length = math.hypot(bx - ax, by - ay)
-    if length <= 0:
-        return
-    ux, uy = (bx - ax) / length, (by - ay) / length
-    t = 0.0
-    while t < length:
-        t2 = min(t + dash, length)
-        draw.line((ax + ux * t, ay + uy * t, ax + ux * t2, ay + uy * t2), fill=color, width=width)
-        t += dash + gap
-
-
-def arrow_head(draw: ImageDraw.ImageDraw, p0: tuple[int, int], p1: tuple[int, int], color: str) -> None:
+def arrow_head(draw: ImageDraw.ImageDraw, p0: tuple[float, float], p1: tuple[float, float], color: str, size: int = 10) -> None:
     angle = math.atan2(p1[1] - p0[1], p1[0] - p0[0])
-    size = 12
-    left = (p1[0] - size * math.cos(angle - 0.46), p1[1] - size * math.sin(angle - 0.46))
-    right = (p1[0] - size * math.cos(angle + 0.46), p1[1] - size * math.sin(angle + 0.46))
+    left = (p1[0] - size * math.cos(angle - 0.48), p1[1] - size * math.sin(angle - 0.48))
+    right = (p1[0] - size * math.cos(angle + 0.48), p1[1] - size * math.sin(angle + 0.48))
     draw.polygon([p1, left, right], fill=color)
 
 
-def arrow(draw: ImageDraw.ImageDraw, pts: list[tuple[int, int]], color: str = "#444444", width: int = 2, dash: bool = False) -> None:
-    if dash:
-        for a, b in zip(pts, pts[1:]):
-            dashed_line(draw, a, b, color, width)
+def dashed_line(
+    draw: ImageDraw.ImageDraw,
+    p0: tuple[float, float],
+    p1: tuple[float, float],
+    color: str,
+    *,
+    width: int = 2,
+    dash: int = 8,
+    gap: int = 7,
+) -> None:
+    x0, y0 = p0
+    x1, y1 = p1
+    length = math.hypot(x1 - x0, y1 - y0)
+    if length == 0:
+        return
+    ux, uy = (x1 - x0) / length, (y1 - y0) / length
+    t = 0.0
+    while t < length:
+        t2 = min(t + dash, length)
+        draw.line((x0 + ux * t, y0 + uy * t, x0 + ux * t2, y0 + uy * t2), fill=color, width=width)
+        t += dash + gap
+
+
+def poly_arrow(
+    draw: ImageDraw.ImageDraw,
+    points: list[tuple[float, float]],
+    color: str,
+    *,
+    width: int = 2,
+    dashed: bool = False,
+) -> None:
+    if dashed:
+        for a, b in zip(points, points[1:]):
+            dashed_line(draw, a, b, color, width=width)
     else:
-        draw.line(pts, fill=color, width=width, joint="curve")
-    arrow_head(draw, pts[-2], pts[-1], color)
+        draw.line(points, fill=color, width=width, joint="curve")
+    arrow_head(draw, points[-2], points[-1], color)
 
 
 def main() -> None:
     OUT.parent.mkdir(parents=True, exist_ok=True)
     img = Image.new("RGB", (W, H), "white")
     draw = ImageDraw.Draw(img)
-    draw.rectangle((0, 0, W - 1, H - 1), outline="#1f2937", width=3)
+    draw.rectangle((0, 0, W - 1, H - 1), outline=COLORS["page_border"], width=2)
 
-    # Left input pipeline.
-    node(draw, (28, 265, 148, 335), COLORS["gray_fill"], COLORS["gray"], ["Video", "stream", "(monocular)"])
-    node(draw, (176, 265, 320, 335), COLORS["gray_fill"], COLORS["gray"], ["Multi-ROI", "extraction", "& preprocessing"])
-    node(draw, (370, 265, 540, 335), COLORS["gray_fill"], COLORS["gray"], ["Frame", "descriptor", "I_t, |grad I_t|"])
-    node(draw, (590, 265, 790, 335), COLORS["gray_fill"], COLORS["gray"], ["Shared encoder", "MobileNetV3-Small", "feature map F_t"])
-    arrow(draw, [(148, 300), (176, 300)], COLORS["gray"])
-    arrow(draw, [(320, 300), (370, 300)], COLORS["gray"])
-    arrow(draw, [(540, 300), (590, 300)], COLORS["gray"])
+    label(draw, 700, 18, "RT-HBTNet: Hybrid Blur-Texture Speed Estimation", COLORS["page_border"])
 
-    split_x = 835
-    draw.line((790, 300, split_x, 300), fill=COLORS["gray"], width=2)
-    draw.line((split_x, 130, split_x, 595), fill=COLORS["gray"], width=2)
+    node(draw, (28, 325, 138, 383), COLORS["gray_fill"], COLORS["gray"], ["Video", "monocular"])
+    node(draw, (165, 325, 295, 383), COLORS["gray_fill"], COLORS["gray"], ["Multi-ROI", "preprocess"])
+    node(draw, (322, 325, 467, 383), COLORS["gray_fill"], COLORS["gray"], ["Descriptor", "I_t + |grad I_t|"])
+    node(draw, (494, 325, 654, 383), COLORS["gray_fill"], COLORS["gray"], ["Shared encoder", "feature map F_t"])
 
-    # Branch boxes.
-    dashed_box(draw, (350, 58, 900, 246), COLORS["blue_fill"], COLORS["blue"], "Temporal Texture Branch")
-    dashed_box(draw, (350, 350, 900, 538), COLORS["amber_fill"], COLORS["amber"], "Blur Physics Branch", label_pos="bottom")
-    dashed_box(draw, (350, 585, 930, 700), COLORS["coral_fill"], COLORS["coral"], "Context Encoder", label_pos="bottom")
-    dashed_box(draw, (940, 96, 1190, 420), COLORS["purple_fill"], COLORS["purple"], "Confidence-Aware Fusion")
-    dashed_box(draw, (1215, 152, 1415, 420), COLORS["teal_fill"], COLORS["teal"], "Temporal Stabilization")
+    poly_arrow(draw, [(138, 354), (165, 354)], COLORS["gray_arrow"])
+    poly_arrow(draw, [(295, 354), (322, 354)], COLORS["gray_arrow"])
+    poly_arrow(draw, [(467, 354), (494, 354)], COLORS["gray_arrow"])
+    draw.line((654, 354, 692, 354), fill=COLORS["gray_arrow"], width=2)
+    draw.line((692, 172, 692, 568), fill=COLORS["gray_arrow"], width=2)
 
-    # Temporal branch.
-    node(draw, (375, 118, 535, 188), COLORS["blue_node"], COLORS["blue"], ["TSM texture", "head"])
-    node(draw, (565, 118, 735, 188), COLORS["blue_node"], COLORS["blue"], ["(2+1)D conv", "+ multi-scale", "ROI pooling"])
-    node(draw, (780, 86, 875, 160), COLORS["green_node"], COLORS["green"], ["Speed", "head", "v_tex"])
-    node(draw, (780, 160, 875, 234), COLORS["teal_node"], COLORS["teal"], ["Conf.", "head", "c_tex"])
-    arrow(draw, [(split_x, 130), (350, 130), (375, 153)], COLORS["gray"])
-    arrow(draw, [(535, 153), (565, 153)], COLORS["blue"])
-    arrow(draw, [(735, 153), (780, 123)], COLORS["blue"])
-    arrow(draw, [(735, 153), (780, 197)], COLORS["blue"])
+    dashed_round_rect(draw, (710, 78, 1070, 248), COLORS["blue_fill"], COLORS["blue"])
+    label(draw, 890, 47, "Temporal Texture Branch", COLORS["blue"])
+    dashed_round_rect(draw, (710, 294, 1070, 464), COLORS["amber_fill"], COLORS["amber"])
+    label(draw, 890, 488, "Blur Physics Branch", COLORS["amber"])
+    dashed_round_rect(draw, (710, 520, 1070, 638), COLORS["coral_fill"], COLORS["coral"])
+    label(draw, 890, 662, "Context Encoder", COLORS["coral"])
 
-    # Blur branch.
-    node(draw, (375, 410, 535, 480), COLORS["amber_node"], COLORS["amber"], ["Blur cue", "head"])
-    node(draw, (565, 410, 735, 480), COLORS["amber_node"], COLORS["amber"], ["Key-frame blur", "representation", "z_blur"])
-    node(draw, (780, 378, 875, 452), COLORS["green_node"], COLORS["green"], ["Speed", "head", "v_blur"])
-    node(draw, (780, 452, 875, 526), COLORS["teal_node"], COLORS["teal"], ["Conf.", "head", "c_blur"])
-    arrow(draw, [(split_x, 445), (350, 445), (375, 445)], COLORS["gray"])
-    arrow(draw, [(535, 445), (565, 445)], COLORS["amber"])
-    arrow(draw, [(735, 445), (780, 415)], COLORS["amber"])
-    arrow(draw, [(735, 445), (780, 489)], COLORS["amber"])
+    node(draw, (740, 124, 852, 182), COLORS["blue_node"], COLORS["blue"], ["TSM head", "texture cues"])
+    node(draw, (882, 124, 1000, 182), COLORS["blue_node"], COLORS["blue"], ["(2+1)D conv", "temporal model"])
+    node(draw, (1022, 110, 1094, 196), COLORS["teal_node"], COLORS["teal"], ["Speed", "+", "Conf."], title_count=2)
 
-    # Context branch.
-    node(draw, (375, 615, 535, 675), COLORS["coral_node"], COLORS["coral"], ["Lightweight", "context encoder"])
-    node(draw, (565, 615, 735, 675), COLORS["coral_node"], COLORS["coral"], ["Observation", "context", "z_ctx"])
-    node(draw, (755, 615, 905, 675), COLORS["coral_node"], COLORS["coral"], ["Quality scores", "bias + stability"])
-    arrow(draw, [(split_x, 595), (350, 595), (375, 645)], COLORS["gray"])
-    arrow(draw, [(535, 645), (565, 645)], COLORS["coral"])
-    arrow(draw, [(735, 645), (755, 645)], COLORS["coral"])
+    node(draw, (740, 340, 852, 398), COLORS["amber_node"], COLORS["amber"], ["Blur head", "physics cues"])
+    node(draw, (882, 340, 1000, 398), COLORS["amber_node"], COLORS["amber"], ["Blur latent", "z_blur"])
+    node(draw, (1022, 326, 1094, 412), COLORS["teal_node"], COLORS["teal"], ["Speed", "+", "Conf."], title_count=2)
 
-    # Fusion.
-    node(draw, (970, 120, 1168, 190), COLORS["purple_node"], COLORS["purple"], ["Fusion weight MLP", "softmax(conf + bias)", "w_tex, w_blur"])
-    node(draw, (970, 235, 1168, 305), COLORS["purple_node"], COLORS["purple"], ["Weighted sum", "v = w_tex*v_tex", "+ w_blur*v_blur"])
-    node(draw, (990, 345, 1148, 405), COLORS["purple_node"], COLORS["purple"], ["Fused speed", "v_hat"])
-    arrow(draw, [(875, 123), (940, 123), (970, 155)], COLORS["purple"])
-    arrow(draw, [(875, 197), (940, 197), (970, 155)], COLORS["purple"])
-    arrow(draw, [(875, 415), (940, 415), (970, 270)], COLORS["amber"])
-    arrow(draw, [(875, 489), (940, 489), (970, 155)], COLORS["purple"])
-    arrow(draw, [(905, 645), (960, 645), (960, 155), (970, 155)], COLORS["coral"], dash=True)
-    arrow(draw, [(1069, 190), (1069, 235)], COLORS["purple"])
-    arrow(draw, [(1069, 305), (1069, 345)], COLORS["purple"])
+    node(draw, (742, 548, 870, 606), COLORS["coral_node"], COLORS["coral"], ["Context", "observation state"])
+    node(draw, (918, 548, 1040, 606), COLORS["coral_node"], COLORS["coral"], ["Quality + bias", "q_t, b_t"])
 
-    # Stabilization.
-    node(draw, (1240, 170, 1390, 235), COLORS["teal_node"], COLORS["teal"], ["Multi-ROI", "robust voting", "median"])
-    node(draw, (1240, 265, 1390, 330), COLORS["teal_node"], COLORS["teal"], ["Temporal filter", "Kalman / EMA"])
-    node(draw, (1240, 360, 1390, 425), COLORS["teal_node"], COLORS["teal"], ["Outlier rejection", "& update"])
-    node(draw, (1445, 355, 1560, 425), COLORS["green_node"], COLORS["green"], ["Final speed", "v_final", "(m/s)"])
-    arrow(draw, [(1148, 375), (1215, 375), (1240, 202)], COLORS["teal"])
-    arrow(draw, [(1315, 235), (1315, 265)], COLORS["teal"])
-    arrow(draw, [(1315, 330), (1315, 360)], COLORS["teal"])
-    arrow(draw, [(1390, 392), (1445, 392)], COLORS["green"])
+    poly_arrow(draw, [(692, 172), (710, 153), (740, 153)], COLORS["gray_arrow"])
+    poly_arrow(draw, [(852, 153), (882, 153)], COLORS["blue"])
+    poly_arrow(draw, [(1000, 153), (1022, 153)], COLORS["blue"])
+
+    poly_arrow(draw, [(692, 369), (710, 369), (740, 369)], COLORS["gray_arrow"])
+    poly_arrow(draw, [(852, 369), (882, 369)], COLORS["amber"])
+    poly_arrow(draw, [(1000, 369), (1022, 369)], COLORS["amber"])
+
+    poly_arrow(draw, [(692, 568), (710, 568), (742, 577)], COLORS["gray_arrow"])
+    poly_arrow(draw, [(870, 577), (918, 577)], COLORS["coral"])
+
+    dashed_round_rect(draw, (1130, 154, 1268, 424), COLORS["purple_fill"], COLORS["purple"])
+    label(draw, 1199, 121, "Fusion", COLORS["purple"])
+    node(draw, (1150, 184, 1248, 242), COLORS["purple_node"], COLORS["purple"], ["Weights", "softmax"])
+    node(draw, (1150, 284, 1248, 342), COLORS["purple_node"], COLORS["purple"], ["Weighted", "sum"])
+    node(draw, (1150, 374, 1248, 408), COLORS["purple_node"], COLORS["purple"], ["v_hat"])
+
+    poly_arrow(draw, [(1094, 153), (1130, 213), (1150, 213)], COLORS["purple"])
+    poly_arrow(draw, [(1094, 369), (1130, 313), (1150, 313)], COLORS["amber"])
+    poly_arrow(draw, [(1040, 577), (1120, 577), (1120, 213), (1150, 213)], COLORS["coral"], dashed=True)
+    poly_arrow(draw, [(1199, 242), (1199, 284)], COLORS["purple"])
+    poly_arrow(draw, [(1199, 342), (1199, 374)], COLORS["purple"])
+
+    dashed_round_rect(draw, (1300, 218, 1372, 408), COLORS["teal_fill"], COLORS["teal"])
+    label(draw, 1336, 186, "Stabilize", COLORS["teal"])
+    node(draw, (1316, 244, 1356, 284), COLORS["teal_node"], COLORS["teal"], ["ROI"], title_count=1)
+    node(draw, (1316, 302, 1356, 342), COLORS["teal_node"], COLORS["teal"], ["EMA"], title_count=1)
+    node(draw, (1316, 360, 1356, 400), COLORS["teal_node"], COLORS["teal"], ["Gate"], title_count=1)
+    node(draw, (1294, 444, 1386, 508), COLORS["green_node"], COLORS["green"], ["Final speed", "v_final m/s"])
+
+    poly_arrow(draw, [(1248, 391), (1300, 391), (1316, 264)], COLORS["teal"])
+    poly_arrow(draw, [(1336, 284), (1336, 302)], COLORS["teal"])
+    poly_arrow(draw, [(1336, 342), (1336, 360)], COLORS["teal"])
+    poly_arrow(draw, [(1336, 400), (1336, 444)], COLORS["green"])
 
     img.save(OUT)
     print(OUT)
