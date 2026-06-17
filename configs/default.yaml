@@ -30,19 +30,6 @@ data:
       flow_subdir: "flow"
       stride: 32
       target_unit: "flow_px_per_frame"
-    presets:
-      gopro_blur:
-        family: "paired_blur"
-        root: "data/raw/GOPRO_Large"
-        split: "train"
-        blur_dir_name: "blur"
-        sharp_dir_name: "sharp"
-      mpi_sintel:
-        family: "flow_temporal"
-        root: "data/raw/MPI-Sintel"
-        split: "training"
-        image_subdir: "final"
-        flow_subdir: "flow"
   clahe:
     enabled: true
     clip_limit: 2.0

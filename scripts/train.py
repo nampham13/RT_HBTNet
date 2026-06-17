@@ -409,7 +409,7 @@ def main() -> None:
     parser.add_argument(
         "--dataset",
         default=None,
-        choices=["video", "paired_blur", "flow_temporal", "gopro_blur", "mpi_sintel"],
+        choices=["video", "paired_blur", "flow_temporal"],
     )
     parser.add_argument("--branch", default=None, choices=["joint", "blur", "temporal"])
     parser.add_argument("--data-root", default=None)
