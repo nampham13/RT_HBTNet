@@ -83,14 +83,32 @@ class AverageMeter:
         }
 
 
-def speed_error_report(preds: ArrayLike, targets: ArrayLike) -> dict[str, Any]:
-    """Return common scalar speed error metrics."""
+def endpoint_error(
+    pred: torch.Tensor,
+    target: torch.Tensor,
+    valid_mask: torch.Tensor | None = None,
+) -> float:
+    """Mean endpoint error for dense two-dimensional vector fields."""
+
+    error = torch.sqrt(torch.sum((pred.float() - target.float()) ** 2, dim=1))
+    if valid_mask is not None:
+        mask = valid_mask.float()
+        if mask.ndim == 4:
+            mask = mask[:, 0]
+        denominator = mask.sum().clamp_min(1.0)
+        return float((error * mask).sum().detach().cpu() / denominator.detach().cpu())
+    return float(error.mean().detach().cpu())
+
+
+def alpha_error_report(preds: ArrayLike, targets: ArrayLike) -> dict[str, Any]:
+    """Return exposure-fraction regression metrics."""
 
     preds_np = _to_numpy(preds)
     targets_np = _to_numpy(targets)
+    absolute = np.abs(preds_np - targets_np)
     return {
-        "mae": mae(preds_np, targets_np),
-        "rmse": rmse(preds_np, targets_np),
-        "mape": mape(preds_np, targets_np),
+        "alpha_mae": float(np.mean(absolute)),
+        "alpha_rmse": float(np.sqrt(np.mean((preds_np - targets_np) ** 2))),
+        "alpha_median_ae": float(np.median(absolute)),
         "num_samples": int(np.size(preds_np)),
     }

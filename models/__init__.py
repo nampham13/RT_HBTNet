@@ -1,5 +1,9 @@
-from .context_encoder import ObservationContextEncoder
-from .factory import RTHBTNetFactory
-from .rt_hbtnet import RTHBTNet
+from .factory import BTShutterNetFactory, RTHBTNetFactory
+from .rt_hbtnet import BTShutterNet, RTHBTNet
 
-__all__ = ["ObservationContextEncoder", "RTHBTNet", "RTHBTNetFactory"]
+__all__ = [
+    "BTShutterNet",
+    "BTShutterNetFactory",
+    "RTHBTNet",
+    "RTHBTNetFactory",
+]

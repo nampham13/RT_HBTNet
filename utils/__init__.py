@@ -1,1 +1,1 @@
-"""Utility helpers for RT-HBTNet."""
+"""Utility helpers for BT-ShutterNet."""

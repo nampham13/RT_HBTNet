@@ -1,59 +1,55 @@
 project:
-  name: "BT-ShutterNet"
+  name: "BT-ShutterNet-Smoke"
   seed: 42
   device: "auto"
 
 data:
   dataset: "exposure_flow"
-  image_size:
-    height: 64
-    width: 128
-  sequence_length: 5
+  image_size: {height: 32, width: 64}
+  sequence_length: 3
   grayscale: true
   normalize: true
   datasets:
     exposure_flow:
-      root: "data/raw/sintel"
+      root: "data/toy_exposure"
       split: "training"
       image_subdir: "final"
       flow_subdir: "flow"
       stride: 2
-      samples_per_clip: 2
-      integration_samples: 9
-      gamma: 2.2
-      alpha_min: 0.02
-      alpha_max: 0.95
-      max_flow: 400.0
+      samples_per_clip: 1
+      integration_samples: 5
+      alpha_values: [0.1, 0.3, 0.6, 0.9]
+      max_flow: 100.0
 
 roi:
   mode: "full"
   rois: []
-  resize_width: 128
-  resize_height: 64
+  resize_width: 64
+  resize_height: 32
 
 model:
   encoder: "mobilenetv3_small"
-  encoder_truncate_at: 4
+  encoder_truncate_at: 2
   encoder_include_edges: true
   in_channels: 1
-  feature_dim: 64
-  temporal_num_blocks: 3
+  feature_dim: 16
+  temporal_num_blocks: 1
   temporal_use_tsm: true
   use_context_quality: true
   prediction_mode: "physics"
-  dropout: 0.1
+  dropout: 0.0
 
 physics:
   eps: 0.000001
-  min_motion_px: 0.25
+  min_motion_px: 0.05
 
 training:
-  batch_size: 8
-  epochs: 30
-  lr: 0.0002
+  batch_size: 2
+  epochs: 1
+  lr: 0.001
   weight_decay: 0.0001
-  num_workers: 2
-  val_fraction: 0.2
+  num_workers: 0
+  val_fraction: 0.25
   loss:
     alpha_weight: 1.0
     local_alpha_weight: 0.0
@@ -63,10 +59,4 @@ training:
     direction_weight: 0.05
 
 inference:
-  show_window: true
   ema_alpha: 0.2
-  min_confidence: 0.05
-
-benchmark:
-  warmup_iters: 20
-  test_iters: 100

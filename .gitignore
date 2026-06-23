@@ -1,0 +1,14 @@
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+
+data/raw/
+data/toy_exposure/
+runs/
+*.pt
+
+.idea/
+.vscode/
+.agents/
+.codex/

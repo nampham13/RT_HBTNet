@@ -1,46 +1,84 @@
-# RT-HBTNet: Real-Time Hybrid Blur-Texture Network
+# BT-ShutterNet
 
-[![Paper](https://img.shields.io/badge/Paper-arXiv-red)](#)
-[![License](https://img.shields.io/badge/License-Apache--2.0-blue)](LICENSE)
+Physics-guided exposure-fraction estimation from ordinary blurred video.
 
-> Monocular video speed estimation with separate blur-physics and temporal-texture branches for low-light, motion-blur conveyor scenarios.
+The project no longer predicts metric speed. Its target is the exposure
+fraction (shutter angle)
 
-## 📌 Abstract
+\[
+\alpha=\frac{t_{\mathrm{exposure}}}{t_{\mathrm{frame}}}\in[0,1],
+\qquad \theta=360^\circ\alpha.
+\]
 
-RT-HBTNet is a research prototype for estimating conveyor belt speed from monocular video without sensors, encoders, lasers, or heavy optical-flow inference at runtime. The model combines a Temporal Texture Branch, a Blur Physics Branch, a Context Encoder, confidence-aware fusion, and temporal stabilization.
+Under locally constant motion, inter-frame displacement \(d\) and the
+within-exposure blur trajectory \(b\) satisfy
 
-Because no public dataset jointly provides conveyor video, blur cues, temporal motion, calibrated speed, and ground truth suitable for fair comparison, the data pipeline is designed around dataset families rather than a single fixed benchmark. Blur cues can be pretrained from paired degraded/reference image data, temporal cues can be pretrained from frame+flow data, and final metric speed should be calibrated or fine-tuned with site-specific labeled video.
+\[
+b \simeq \alpha d.
+\]
 
-## 🏗️ Architecture
+BT-ShutterNet preserves separate temporal-texture and blur-physics branches,
+but does not fuse two unconstrained scalar regressions. The branches predict
+dense vector fields and uncertainty maps. A non-learned weighted
+least-squares layer then estimates \(\alpha\).
 
-![Architecture](assets/architecture.png)
+## Why both cues are needed
 
-Architecture source: [render_architecture.py](d:/accv26/rt_hbtnet/scripts/render_architecture.py)
+- A blurred frame alone cannot distinguish fast motion from long exposure.
+- Temporal displacement alone does not reveal how much of the frame interval
+  the sensor integrated light.
+- Their ratio is physically meaningful and does not require metric scene
+  scale, camera calibration, or speed labels.
 
-## 🚀 Getting Started
+## Architecture
 
-### Requirements
-
-- Python 3.8+
-- PyTorch
-- torchvision
-- OpenCV
-- NumPy
-- PyYAML
-- tqdm
-- pandas
-- matplotlib
-- pytest
-
-### Installation
-
-```bash
-git clone https://github.com/user/rt_hbtnet
-cd rt_hbtnet
-pip install -r requirements.txt
+```text
+blurred clip B,T,C,H,W
+          |
+  shared MobileNetV3 encoder
+          |
+   +------+------+
+   |             |
+temporal       key-frame blur
+(2+1)D/TSM     directional/Sobel cues
+   |             |
+motion field d  blur field b
+uncertainty     uncertainty
+   +------ context quality ------+
+                    |
+       alpha = weighted |b.d| / ||d||^2
 ```
 
-For Windows virtual environments:
+The blur direction is ambiguous modulo sign, so training and inference use
+sign-invariant vector consistency.
+
+## Data
+
+The implemented training adapter uses frame sequences with Middlebury
+`.flo` ground truth, such as MPI Sintel:
+
+```text
+data/raw/sintel/
+  training/
+    final/<scene>/frame_XXXX.png
+    flow/<scene>/frame_XXXX.flo
+```
+
+The renderer creates physically controlled blur by integrating flow-warped
+sharp frames in linear-light space. Every sample provides:
+
+- blurred clip;
+- exposure fraction `alpha`;
+- center-frame inter-frame motion flow;
+- blur flow `alpha * motion_flow`;
+- valid-pixel mask.
+
+The train/validation split is scene-disjoint to prevent neighboring frames
+from leaking across partitions.
+
+See [data/README.md](data/README.md) for setup details.
+
+## Install
 
 ```powershell
 python -m venv .venv
@@ -48,134 +86,89 @@ python -m venv .venv
 pip install -r requirements.txt
 ```
 
-## 📂 Dataset
+## Smoke data
 
-Recommended layout:
+Create a tiny deterministic dataset for checking the full pipeline:
 
-```text
-data/
-  raw/
-    paired_blur/
-      train/<sequence>/blur/*.png
-      train/<sequence>/sharp/*.png
-      test/<sequence>/blur/*.png
-      test/<sequence>/sharp/*.png
-    flow_temporal/
-      training/final/<scene>/frame_*.png
-      training/flow/<scene>/frame_*.flo
-    site_speed/
-      videos/*.mp4
-  manifests/
-    site_speed/labels.csv
-    paired_blur/train.csv
-    flow_temporal/train.csv
-  processed/
-    paired_blur/
-    flow_temporal/
-  splits/
-    paired_blur/
-    flow_temporal/
-    site_speed/
+```powershell
+python scripts/make_toy_exposure_data.py
+python scripts/train.py --config configs/smoke.yaml --epochs 1 --num-workers 0
 ```
 
-For metric speed training, create a labeled-video CSV:
+Toy data is only for software verification and must never be reported as a
+research result.
 
-```csv
-video_path,start_frame,end_frame,speed_mps
-belt_001.mp4,0,300,1.25
-belt_002.mp4,50,350,2.10
+## Training
+
+```powershell
+python scripts/train.py ^
+  --config configs/default.yaml ^
+  --dataset exposure_flow ^
+  --data-root data/raw/sintel ^
+  --save-dir runs/exposure
 ```
 
-Relative `video_path` values are resolved through `--video-root`.
+Artifacts:
 
-Supported dataset families:
+- `best.pt` and `last.pt`;
+- resolved `config.yaml`;
+- `history.csv` containing alpha MAE/RMSE, motion EPE and blur EPE.
 
-- `video`: site-specific labeled conveyor videos with `speed_mps`.
-- `paired_blur`: generic paired degraded/reference images for blur-branch pretraining.
-- `flow_temporal`: generic frame sequence + dense flow data for temporal-branch pretraining.
+Evaluate synthetic or manifest-based real video:
 
-## 🏋️ Training
-
-Train with site-specific labeled video:
-
-```bash
-python scripts/train.py --config configs/default.yaml --dataset video --labels data/manifests/site_speed/labels.csv --video-root data/raw/site_speed/videos
+```powershell
+python scripts/evaluate.py ^
+  --config configs/default.yaml ^
+  --weights runs/exposure/best.pt ^
+  --dataset exposure_video ^
+  --data-root data/raw/bsd ^
+  --manifest data/raw/bsd/manifest.csv ^
+  --output runs/exposure/bsd_report.json
 ```
 
-Pretrain only the blur branch:
+## Inference
 
-```bash
-python scripts/train.py --config configs/default.yaml --dataset paired_blur --branch blur --data-root data/raw/paired_blur --save-dir runs/pretrain_blur
+```powershell
+python scripts/infer_video.py ^
+  --config configs/default.yaml ^
+  --weights runs/exposure/best.pt ^
+  --video path/to/video.mp4
 ```
 
-Pretrain only the temporal branch:
+The output reports exposure fraction, shutter angle, inferred exposure time
+from video FPS, and model confidence.
 
-```bash
-python scripts/train.py --config configs/default.yaml --dataset flow_temporal --branch temporal --data-root data/raw/flow_temporal --save-dir runs/pretrain_temporal
+## Benchmark
+
+```powershell
+python scripts/benchmark.py --config configs/default.yaml --sequence-length 5
 ```
 
-Checkpoints and logs are written to `runs/train` by default:
+## Evaluation protocol
 
-- `best.pt`
-- `last.pt`
-- `config.yaml`
-- `history.csv`
-- `training_curves.png`
+The primary real benchmark is the Beam-Splitter Dataset. The direct baseline
+is Korčák and Matas, *Video Shutter Angle Estimation using Optical Flow and
+Linear Blur*, which reports exposure-fraction MAE 0.039 over 600 clips.
 
-## 🔎 Inference
+Required comparisons and ablations are specified in
+[docs/RESEARCH_PROTOCOL.md](docs/RESEARCH_PROTOCOL.md).
+Measured implementation diagnostics are tracked separately in
+[docs/DEVELOPMENT_STATUS.md](docs/DEVELOPMENT_STATUS.md).
 
-Run inference on a video:
+## Current status
 
-```bash
-python scripts/infer_video.py --config configs/default.yaml --weights runs/train/best.pt --video data/raw/site_speed/videos/belt_001.mp4
-```
+- Dataset renderer, model, loss, training, inference and tests are implemented.
+- Unit tests verify blur synthesis, target consistency and the physics layer.
+- The full model has 342,703 trainable parameters and measured 10.30 ms per
+  five-frame 64x128 clip (97.1 FPS) on the local GTX 1650.
+- No paper result is claimed yet: Sintel/BSD experiments still need to be run.
 
-Use a fixed ROI:
+## Limitations
 
-```bash
-python scripts/infer_video.py --config configs/default.yaml --weights runs/train/best.pt --video data/raw/site_speed/videos/belt_001.mp4 --roi "100,100,400,160"
-```
-
-Run headless and save annotated output:
-
-```bash
-python scripts/infer_video.py --config configs/default.yaml --weights runs/train/best.pt --video data/raw/site_speed/videos/belt_001.mp4 --no-display --save-output runs/infer/output.mp4
-```
-
-## 📊 Results
-
-| Method | MAE (m/s) | RMSE | MAPE (%) |
-|--------|-----------|------|----------|
-| RT-HBTNet | TBD | TBD | TBD |
-
-Report site-specific calibration settings, ROI policy, camera FPS, and train/validation split when filling this table.
-
-## 📁 Project Structure
-
-```text
-configs/      YAML configuration files
-datasets/     Dataset adapters for video, paired blur, and frame+flow data
-models/       RT-HBTNet branches, fusion blocks, and model factory
-scripts/      Training, inference, and benchmark entry points
-tests/        Pytest coverage for datasets, ROI, filters, fusion, and model shapes
-utils/        Preprocessing, ROI detection, metrics, calibration, and visualization
-architect.tex Architecture diagram source
-```
-
-## 🧪 Testing
-
-```bash
-pytest
-```
-
-Focused smoke check:
-
-```bash
-pytest tests/test_model_shapes.py tests/test_factories.py
-```
-
-## ⚠️ Limitations
-
-This is a research prototype. Do not treat its output as production-grade measurement without validation against calibrated ground truth.
-
-CV-only monocular video cannot reliably estimate absolute speed if the belt has no useful visual texture, repeated ambiguous patterns, or no motion-induced signal. Metric speed requires known reference-speed data or pixel-to-meter calibration, and camera position, lens, zoom, and ROI should remain fixed after calibration.
+- The local model assumes approximately constant motion during exposure.
+- Tiny blur, severe blur, saturation, low texture and rolling-shutter vertical
+  motion remain difficult.
+- Synthetic flow-warp blur does not fully reproduce real sensor noise,
+  response functions, occlusion and spatially varying exposure.
+- A confidence score is not a substitute for calibration; reliability must be
+  evaluated on held-out real videos.

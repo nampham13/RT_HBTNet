@@ -6,25 +6,19 @@ import torch
 from torch import nn
 from torch.nn import functional as F
 
-from .blur_physics_branch import BlurPhysicsDescriptor
-from .blocks import (
-    Conv2Plus1DBlock,
-    MLPHead,
-    MultiScaleTemporalPool,
-    init_lightweight,
-)
-from .factory import EncoderComponentFactory, ModelAuxFactory, ModelBuildConfig, RTHBTNetFactory
+from .blocks import Conv2Plus1DBlock, ConvBNAct, MobileNetV3SmallFrameEncoder, init_lightweight
+from .blur_descriptor import BlurPhysicsDescriptor
+from .factory import BTShutterNetFactory, ModelBuildConfig
 
 
-class TemporalTextureHead(nn.Module):
-    """Temporal speed head operating on shared per-frame feature maps."""
+class DenseTemporalMotionHead(nn.Module):
+    """Predict inter-frame displacement and aleatoric uncertainty."""
 
     def __init__(
         self,
         feature_dim: int = 64,
+        num_blocks: int = 3,
         dropout: float = 0.1,
-        num_temporal_blocks: int = 3,
-        pool_scales: tuple[int, ...] = (1, 2, 4),
         use_tsm: bool = True,
     ) -> None:
         super().__init__()
@@ -35,143 +29,227 @@ class TemporalTextureHead(nn.Module):
                     dropout=float(dropout),
                     use_tsm=bool(use_tsm),
                 )
-                for _ in range(int(num_temporal_blocks))
+                for _ in range(int(num_blocks))
             ]
         )
-        self.pool = MultiScaleTemporalPool(
-            channels=int(feature_dim),
-            output_dim=int(feature_dim),
-            scales=tuple(pool_scales),
-            dropout=float(dropout),
+        self.refine = nn.Sequential(
+            ConvBNAct(feature_dim * 2, feature_dim, kernel_size=3),
+            ConvBNAct(feature_dim, feature_dim, kernel_size=3),
         )
-        self.speed_head = MLPHead(feature_dim, out_dim=1, hidden_dim=feature_dim, dropout=float(dropout))
-        self.conf_head = MLPHead(feature_dim, out_dim=1, hidden_dim=feature_dim, dropout=float(dropout))
-        init_lightweight(self)
+        self.motion_head = nn.Conv2d(feature_dim, 2, kernel_size=3, padding=1)
+        self.logvar_head = nn.Conv2d(feature_dim, 1, kernel_size=3, padding=1)
+        init_lightweight(self.refine)
+        init_lightweight(self.motion_head)
+        init_lightweight(self.logvar_head)
 
-    def forward(self, frame_features: torch.Tensor) -> dict[str, torch.Tensor]:
-        if frame_features.ndim == 3:
-            temporal_maps = frame_features.transpose(1, 2).unsqueeze(-1).unsqueeze(-1)  # B,D,T,1,1
-        elif frame_features.ndim == 5:
-            temporal_maps = frame_features.permute(0, 2, 1, 3, 4).contiguous()  # B,D,T,H,W
-        else:
-            raise ValueError("frame_features must have shape B,T,D or B,T,D,H,W")
-
-        temporal_maps = self.temporal(temporal_maps)  # B,D,T,H,W
-        feat = self.pool(temporal_maps)  # B,D
-        speed_tex = F.softplus(self.speed_head(feat))
-        conf_logit = self.conf_head(feat)
-        conf_tex = torch.sigmoid(conf_logit)
+    def forward(self, frame_maps: torch.Tensor) -> dict[str, torch.Tensor]:
+        if frame_maps.ndim != 5:
+            raise ValueError("frame_maps must have shape B,T,D,H,W")
+        maps = frame_maps.permute(0, 2, 1, 3, 4).contiguous()
+        temporal = self.temporal(maps)
+        center = temporal[:, :, temporal.shape[2] // 2]
+        endpoint_delta = temporal[:, :, -1] - temporal[:, :, 0]
+        feature = self.refine(torch.cat([center, endpoint_delta], dim=1))
         return {
-            "speed_tex": speed_tex,
-            "conf_tex": conf_tex,
-            "texture_features": feat,
-            "confidence_logit": conf_logit.squeeze(-1),
+            "motion_flow": self.motion_head(feature),
+            "motion_logvar": torch.clamp(self.logvar_head(feature), -6.0, 6.0),
+            "temporal_features": feature,
         }
 
 
-class BlurFeatureHead(nn.Module):
-    """Blur speed head operating on shared features plus fixed blur physics."""
+class DenseBlurMotionHead(nn.Module):
+    """Predict the exposure trajectory encoded by one blurred key frame."""
 
-    def __init__(self, feature_dim: int = 64, in_channels: int = 1, dropout: float = 0.1) -> None:
+    def __init__(self, feature_dim: int = 64, in_channels: int = 1) -> None:
         super().__init__()
         self.physics_descriptor = BlurPhysicsDescriptor(in_channels=int(in_channels))
-        self.physics_proj = nn.Sequential(
-            nn.Linear(self.physics_descriptor.summary_dim, int(feature_dim)),
-            nn.LayerNorm(int(feature_dim)),
-            nn.SiLU(inplace=True),
-            nn.Dropout(float(dropout)),
+        in_dim = int(feature_dim) + self.physics_descriptor.spatial_descriptor_channels
+        self.refine = nn.Sequential(
+            ConvBNAct(in_dim, feature_dim, kernel_size=3),
+            ConvBNAct(feature_dim, feature_dim, kernel_size=3),
         )
-        self.feature_fuse = nn.Sequential(
-            nn.Linear(int(feature_dim) * 2, int(feature_dim)),
-            nn.LayerNorm(int(feature_dim)),
-            nn.SiLU(inplace=True),
-            nn.Dropout(float(dropout)),
+        self.blur_head = nn.Conv2d(feature_dim, 2, kernel_size=3, padding=1)
+        self.logvar_head = nn.Conv2d(feature_dim, 1, kernel_size=3, padding=1)
+        init_lightweight(self.refine)
+        init_lightweight(self.blur_head)
+        init_lightweight(self.logvar_head)
+
+    def forward(self, key_map: torch.Tensor, key_frame: torch.Tensor) -> dict[str, torch.Tensor]:
+        descriptor, _ = self.physics_descriptor(key_frame)
+        descriptor = F.interpolate(
+            descriptor,
+            size=key_map.shape[-2:],
+            mode="bilinear",
+            align_corners=False,
         )
-        self.speed_head = MLPHead(feature_dim, out_dim=1, hidden_dim=feature_dim, dropout=float(dropout))
-        self.conf_head = MLPHead(feature_dim, out_dim=1, hidden_dim=feature_dim, dropout=float(dropout))
-        init_lightweight(self)
-
-    def forward(self, key_feature: torch.Tensor, key_frame: torch.Tensor) -> dict[str, torch.Tensor]:
-        if key_feature.ndim != 2:
-            raise ValueError("key_feature must have shape B,D")
-        if key_frame.ndim != 4:
-            raise ValueError("key_frame must have shape B,C,H,W")
-
-        physics_summary = self.physics_descriptor.summary_features(key_frame)
-        physics_feature = self.physics_proj(physics_summary)
-        blur_feature = self.feature_fuse(torch.cat([key_feature, physics_feature], dim=1))
-
-        speed_blur = F.softplus(self.speed_head(blur_feature))
-        conf_blur = torch.sigmoid(self.conf_head(blur_feature))
+        feature = self.refine(torch.cat([key_map, descriptor], dim=1))
         return {
-            "speed_blur": speed_blur,
-            "conf_blur": conf_blur,
-            "blur_features": blur_feature,
+            "blur_flow": self.blur_head(feature),
+            "blur_logvar": torch.clamp(self.logvar_head(feature), -6.0, 6.0),
+            "blur_features": feature,
         }
 
 
-class RTHBTNet(nn.Module):
-    """Full RT-HBTNet model.
+class ObservationQualityHead(nn.Module):
+    """Estimate locations where both blur and temporal cues are observable."""
 
-    Input:
-        ``x_seq`` with shape ``B,T,C,H,W``.
+    def __init__(self, feature_dim: int = 64) -> None:
+        super().__init__()
+        self.net = nn.Sequential(
+            ConvBNAct(feature_dim * 3, feature_dim, kernel_size=3),
+            nn.Conv2d(feature_dim, 1, kernel_size=3, padding=1),
+        )
+        init_lightweight(self.net)
 
-    Output:
-        A dictionary containing fused speed/confidence and branch diagnostics.
-        All speed, confidence, context-quality, and context-bias diagnostics use
-        batch-aligned shapes. Scalar outputs use ``B,1``.
+    def forward(
+        self,
+        key_map: torch.Tensor,
+        temporal_features: torch.Tensor,
+        blur_features: torch.Tensor,
+    ) -> torch.Tensor:
+        return torch.sigmoid(self.net(torch.cat([key_map, temporal_features, blur_features], dim=1)))
+
+
+class ScalarAlphaHead(nn.Module):
+    """Small scalar baseline head used only for controlled ablations."""
+
+    def __init__(self, in_channels: int, hidden_dim: int) -> None:
+        super().__init__()
+        self.net = nn.Sequential(
+            nn.AdaptiveAvgPool2d(1),
+            nn.Flatten(),
+            nn.Linear(int(in_channels), int(hidden_dim)),
+            nn.SiLU(inplace=True),
+            nn.Linear(int(hidden_dim), 1),
+        )
+        init_lightweight(self.net)
+
+    def forward(self, feature: torch.Tensor) -> torch.Tensor:
+        return torch.sigmoid(self.net(feature))
+
+
+class ExposurePhysicsLayer(nn.Module):
+    """Robust weighted least-squares estimator of exposure fraction.
+
+    Motion blur has an orientation ambiguity, so the projection uses the
+    absolute dot product between blur and inter-frame displacement vectors.
     """
+
+    def __init__(self, eps: float = 1.0e-6, min_motion_px: float = 0.25) -> None:
+        super().__init__()
+        self.eps = float(eps)
+        self.min_motion_px = float(min_motion_px)
+
+    def forward(
+        self,
+        motion_flow: torch.Tensor,
+        blur_flow: torch.Tensor,
+        motion_logvar: torch.Tensor,
+        blur_logvar: torch.Tensor,
+        context_quality: torch.Tensor | None = None,
+    ) -> dict[str, torch.Tensor]:
+        if motion_flow.shape != blur_flow.shape or motion_flow.shape[1] != 2:
+            raise ValueError("motion_flow and blur_flow must have matching B,2,H,W shapes")
+
+        motion_energy = motion_flow.square().sum(dim=1, keepdim=True)
+        projected_blur = (motion_flow * blur_flow).sum(dim=1, keepdim=True).abs()
+        alpha_map = projected_blur / (motion_energy + self.eps)
+
+        uncertainty_weight = torch.exp(
+            -0.5 * torch.clamp(motion_logvar + blur_logvar, min=-8.0, max=8.0)
+        )
+        observable = (motion_energy >= self.min_motion_px**2).to(motion_flow.dtype)
+        weight = uncertainty_weight * observable
+        if context_quality is not None:
+            weight = weight * context_quality
+
+        numerator = (weight * projected_blur).sum(dim=(2, 3))
+        denominator = (weight * motion_energy).sum(dim=(2, 3)) + self.eps
+        alpha_raw = numerator / denominator
+        alpha = torch.clamp(alpha_raw, 0.0, 1.0)
+
+        signed_residual = torch.minimum(
+            (blur_flow - alpha[:, :, None, None] * motion_flow).square().sum(dim=1, keepdim=True),
+            (blur_flow + alpha[:, :, None, None] * motion_flow).square().sum(dim=1, keepdim=True),
+        ).sqrt()
+        residual_score = torch.exp(
+            -(weight * signed_residual).sum(dim=(2, 3))
+            / (weight.sum(dim=(2, 3)) + self.eps)
+        )
+        coverage = observable.mean(dim=(2, 3))
+        confidence = torch.clamp(residual_score * torch.sqrt(coverage + self.eps), 0.0, 1.0)
+        return {
+            "alpha": alpha,
+            "alpha_raw": alpha_raw,
+            "alpha_map": alpha_map,
+            "physics_weight": weight,
+            "confidence": confidence,
+            "physics_residual": signed_residual,
+        }
+
+
+class BTShutterNet(nn.Module):
+    """Lightweight blur-temporal exposure-fraction estimator."""
 
     def __init__(
         self,
-        in_channels: int | ModelBuildConfig = 1,
-        base_channels: int = 24,
-        temporal_hidden: int = 64,
+        config: ModelBuildConfig | None = None,
+        *,
+        in_channels: int = 1,
+        feature_dim: int = 64,
         dropout: float = 0.1,
-        use_context: bool = True,
-        context_hidden: int | None = None,
-        encoder: str = "mobilenetv3_small",
         encoder_truncate_at: int = 4,
         encoder_include_edges: bool = True,
-        texture_num_blocks: int = 3,
-        texture_pool_scales: tuple[int, ...] = (1, 2, 4),
-        texture_use_tsm: bool = True,
-        fusion_eps: float = 1.0e-6,
-        min_confidence: float = 0.0,
+        temporal_num_blocks: int = 3,
+        temporal_use_tsm: bool = True,
+        use_context_quality: bool = True,
+        prediction_mode: str = "physics",
+        physics_eps: float = 1.0e-6,
+        min_motion_px: float = 0.25,
     ) -> None:
         super().__init__()
-        cfg = (
-            in_channels
-            if isinstance(in_channels, ModelBuildConfig)
-            else ModelBuildConfig(
-                in_channels=int(in_channels),
-                base_channels=int(base_channels),
-                temporal_hidden=int(temporal_hidden),
-                dropout=float(dropout),
-                use_context=bool(use_context),
-                context_hidden=context_hidden,
-                encoder=str(encoder),
-                encoder_truncate_at=int(encoder_truncate_at),
-                encoder_include_edges=bool(encoder_include_edges),
-                texture_num_blocks=int(texture_num_blocks),
-                texture_pool_scales=tuple(texture_pool_scales),
-                texture_use_tsm=bool(texture_use_tsm),
-                fusion_eps=float(fusion_eps),
-                min_confidence=float(min_confidence),
-            )
+        cfg = config or ModelBuildConfig(
+            in_channels=int(in_channels),
+            feature_dim=int(feature_dim),
+            dropout=float(dropout),
+            encoder_truncate_at=int(encoder_truncate_at),
+            encoder_include_edges=bool(encoder_include_edges),
+            temporal_num_blocks=int(temporal_num_blocks),
+            temporal_use_tsm=bool(temporal_use_tsm),
+            use_context_quality=bool(use_context_quality),
+            prediction_mode=str(prediction_mode),
+            physics_eps=float(physics_eps),
+            min_motion_px=float(min_motion_px),
         )
-        self.use_context = cfg.use_context
-        self.in_channels = cfg.in_channels
-        self.encoder_type = cfg.encoder_type
-        self.encoder_include_edges = cfg.encoder_include_edges
+        if cfg.encoder.lower() not in {"mobilenetv3_small", "mobilenetv3_small_truncated"}:
+            raise ValueError("BT-ShutterNet currently supports the shared MobileNetV3-Small encoder")
 
-        components = EncoderComponentFactory.create(cfg)
-        self.frame_encoder = components.frame_encoder
-        self.texture_head = components.texture_head
-        self.blur_head = components.blur_head
-        self.texture_branch = components.texture_branch
-        self.blur_branch = components.blur_branch
-        self.context_encoder = ModelAuxFactory.create_context_encoder(cfg)
+        self.in_channels = cfg.in_channels
+        self.encoder_include_edges = cfg.encoder_include_edges
+        self.prediction_mode = cfg.prediction_mode.lower()
+        supported_modes = {"physics", "direct", "blur_only", "temporal_only"}
+        if self.prediction_mode not in supported_modes:
+            raise ValueError(f"prediction_mode must be one of {sorted(supported_modes)}")
+        descriptor_channels = self.in_channels * (2 if self.encoder_include_edges else 1)
+        self.frame_encoder = MobileNetV3SmallFrameEncoder(
+            in_ch=descriptor_channels,
+            feature_dim=cfg.feature_dim,
+            truncate_at=cfg.encoder_truncate_at,
+        )
+        self.temporal_head = DenseTemporalMotionHead(
+            feature_dim=cfg.feature_dim,
+            num_blocks=cfg.temporal_num_blocks,
+            dropout=cfg.dropout,
+            use_tsm=cfg.temporal_use_tsm,
+        )
+        self.blur_head = DenseBlurMotionHead(feature_dim=cfg.feature_dim, in_channels=self.in_channels)
+        self.context_head = ObservationQualityHead(cfg.feature_dim) if cfg.use_context_quality else None
+        self.physics = ExposurePhysicsLayer(eps=cfg.physics_eps, min_motion_px=cfg.min_motion_px)
+        self.scalar_head: ScalarAlphaHead | None = None
+        if self.prediction_mode == "direct":
+            self.scalar_head = ScalarAlphaHead(cfg.feature_dim * 3, cfg.feature_dim)
+        elif self.prediction_mode in {"blur_only", "temporal_only"}:
+            self.scalar_head = ScalarAlphaHead(cfg.feature_dim, cfg.feature_dim)
 
         sobel_x = torch.tensor(
             [[-1.0, 0.0, 1.0], [-2.0, 0.0, 2.0], [-1.0, 0.0, 1.0]],
@@ -183,7 +261,6 @@ class RTHBTNet(nn.Module):
         ).view(1, 1, 3, 3)
         self.register_buffer("sobel_x", sobel_x.repeat(self.in_channels, 1, 1, 1), persistent=False)
         self.register_buffer("sobel_y", sobel_y.repeat(self.in_channels, 1, 1, 1), persistent=False)
-        self.fusion = ModelAuxFactory.create_fusion(cfg)
 
     def forward(self, x_seq: torch.Tensor) -> dict[str, torch.Tensor]:
         if x_seq.ndim != 5:
@@ -191,110 +268,70 @@ class RTHBTNet(nn.Module):
         if x_seq.shape[2] != self.in_channels:
             raise ValueError(f"expected {self.in_channels} channels, got {x_seq.shape[2]}")
 
-        if self.encoder_type in ("legacy", "separate", "separate_encoders"):
-            if self.texture_branch is None or self.blur_branch is None:
-                raise RuntimeError("legacy branches are not initialized")
-            texture = self.texture_branch(x_seq)  # full sequence: B,T,C,H,W
-            x_key = x_seq[:, -1]  # last frame: B,C,H,W
-            blur = self.blur_branch(x_key)
-            context = self._encode_context(
-                texture_features=texture["texture_features"],
-                blur_features=blur["blur_features"],
-            )
-        else:
-            if self.frame_encoder is None or self.texture_head is None or self.blur_head is None:
-                raise RuntimeError("shared encoder heads are not initialized")
-            b, t, c, h, w = x_seq.shape
-            x_flat = x_seq.reshape(b * t, c, h, w)
-            descriptor = self._make_frame_descriptor(x_flat)
-            feature_maps_flat = self.frame_encoder.forward_features(descriptor)  # B*T,D,H',W'
-            _, d, feat_h, feat_w = feature_maps_flat.shape
-            frame_maps = feature_maps_flat.reshape(b, t, d, feat_h, feat_w)  # B,T,D,H',W'
-            frame_features = self.frame_encoder.pool_features(feature_maps_flat)
-            frame_features = frame_features.reshape(b, t, -1)  # B,T,D
-            texture = self.texture_head(frame_maps)
-            blur = self.blur_head(frame_features[:, -1], x_seq[:, -1])
-            context = self._encode_context(frame_features=frame_features)
+        batch, timesteps, channels, height, width = x_seq.shape
+        flat = x_seq.reshape(batch * timesteps, channels, height, width)
+        descriptor = self._make_frame_descriptor(flat)
+        maps_flat = self.frame_encoder.forward_features(descriptor)
+        frame_maps = maps_flat.reshape(batch, timesteps, *maps_flat.shape[1:])
+        center = timesteps // 2
+        key_map = frame_maps[:, center]
+        key_frame = x_seq[:, center]
 
-        fused = self.fusion(
-            speed_tex=texture["speed_tex"],  # B,1
-            conf_tex=texture["conf_tex"],  # B,1
-            speed_blur=blur["speed_blur"],  # B,1
-            conf_blur=blur["conf_blur"],  # B,1
-            context_bias=None if context is None else context["context_bias"],  # B,2
-            obs_quality=None if context is None else context["obs_quality"],  # B,1
-            texture_features=texture["texture_features"],  # B,D
-            blur_features=blur["blur_features"],  # B,D
+        temporal = self.temporal_head(frame_maps)
+        blur = self.blur_head(key_map, key_frame)
+        context_quality = None
+        if self.context_head is not None:
+            context_quality = self.context_head(
+                key_map,
+                temporal["temporal_features"],
+                blur["blur_features"],
+            )
+        physics = self.physics(
+            motion_flow=temporal["motion_flow"],
+            blur_flow=blur["blur_flow"],
+            motion_logvar=temporal["motion_logvar"],
+            blur_logvar=blur["blur_logvar"],
+            context_quality=context_quality,
         )
-
         out = {
-            "speed": fused["speed"],  # B,1
-            "conf_final": fused["conf_final"],  # B,1
-            "speed_tex": texture["speed_tex"],  # B,1
-            "conf_tex": texture["conf_tex"],  # B,1
-            "speed_blur": blur["speed_blur"],  # B,1
-            "conf_blur": blur["conf_blur"],  # B,1
-            "w_tex": fused["w_tex"],  # B,1
-            "w_blur": fused["w_blur"],  # B,1
+            **physics,
+            "alpha_physics": physics["alpha"],
+            "motion_flow": temporal["motion_flow"],
+            "motion_logvar": temporal["motion_logvar"],
+            "blur_flow": blur["blur_flow"],
+            "blur_logvar": blur["blur_logvar"],
         }
-        if "fusion_attention_bias_tex" in fused:
-            out.update(
-                {
-                    "fusion_attention_bias_tex": fused["fusion_attention_bias_tex"],  # B,1
-                    "fusion_attention_bias_blur": fused["fusion_attention_bias_blur"],  # B,1
-                }
-            )
-        if context is not None:
-            out.update(
-                {
-                    "obs_quality": context["obs_quality"],  # B,1
-                    "context_bias_tex": context["context_bias_tex"],  # B,1
-                    "context_bias_blur": context["context_bias_blur"],  # B,1
-                }
-            )
+        if self.scalar_head is not None:
+            if self.prediction_mode == "direct":
+                scalar_feature = torch.cat(
+                    [key_map, temporal["temporal_features"], blur["blur_features"]],
+                    dim=1,
+                )
+            elif self.prediction_mode == "blur_only":
+                scalar_feature = blur["blur_features"]
+            else:
+                scalar_feature = temporal["temporal_features"]
+            out["alpha"] = self.scalar_head(scalar_feature)
+        if context_quality is not None:
+            out["context_quality"] = context_quality
         return out
 
-    def _encode_context(
-        self,
-        frame_features: torch.Tensor | None = None,
-        *,
-        texture_features: torch.Tensor | None = None,
-        blur_features: torch.Tensor | None = None,
-    ) -> dict[str, torch.Tensor] | None:
-        if self.context_encoder is None:
-            return None
-        return self.context_encoder(
-            frame_features=frame_features,
-            texture_features=texture_features,
-            blur_features=blur_features,
-        )
-
-    def _make_frame_descriptor(self, x_frame: torch.Tensor) -> torch.Tensor:
+    def _make_frame_descriptor(self, frame: torch.Tensor) -> torch.Tensor:
         if not self.encoder_include_edges:
-            return x_frame
+            return frame
+        grad_x = F.conv2d(frame, self.sobel_x, padding=1, groups=self.in_channels)
+        grad_y = F.conv2d(frame, self.sobel_y, padding=1, groups=self.in_channels)
+        edge = torch.sqrt(grad_x.square() + grad_y.square() + 1.0e-6)
+        return torch.cat([frame, edge], dim=1)
 
-        grad_x = F.conv2d(x_frame, self.sobel_x, padding=1, groups=self.in_channels)
-        grad_y = F.conv2d(x_frame, self.sobel_y, padding=1, groups=self.in_channels)
-        edge_mag = torch.sqrt(grad_x.square() + grad_y.square() + 1.0e-6)
-        return torch.cat([x_frame, edge_mag], dim=1)
+
+# Keep the original import name while making the scientific target explicit.
+RTHBTNet = BTShutterNet
 
 
 def count_parameters(model: nn.Module) -> int:
-    """Count trainable parameters."""
-
-    return sum(param.numel() for param in model.parameters() if param.requires_grad)
+    return sum(parameter.numel() for parameter in model.parameters() if parameter.requires_grad)
 
 
-def build_model_from_config(config: dict[str, Any]) -> RTHBTNet:
-    """Build ``RTHBTNet`` from the project config dictionary."""
-
-    return RTHBTNetFactory.create(config)
-
-
-if __name__ == "__main__":
-    model = RTHBTNet()
-    x = torch.randn(2, 64, 1, 64, 128)  # B,T,C,H,W
-    y = model(x)
-    print(f"parameters: {count_parameters(model)}")
-    for name, tensor in y.items():
-        print(f"{name}: {tuple(tensor.shape)}")
+def build_model_from_config(config: dict[str, Any]) -> BTShutterNet:
+    return BTShutterNetFactory.create(config)  # type: ignore[return-value]

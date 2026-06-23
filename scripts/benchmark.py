@@ -73,11 +73,11 @@ def load_weights(model: torch.nn.Module, weights: str | None, device: torch.devi
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Benchmark RT-HBTNet latency")
+    parser = argparse.ArgumentParser(description="Benchmark BT-ShutterNet latency")
     parser.add_argument("--config", default="configs/default.yaml")
     parser.add_argument("--weights", default=None)
     parser.add_argument("--batch-size", type=int, default=1)
-    parser.add_argument("--sequence-length", type=int, default=64)
+    parser.add_argument("--sequence-length", type=int, default=5)
     parser.add_argument("--iters", type=int, default=200)
     parser.add_argument("--warmup", type=int, default=20)
     args = parser.parse_args()
@@ -107,8 +107,8 @@ def main() -> None:
     avg_ms = statistics.mean(times_ms)
     fps = 1000.0 * int(args.batch_size) / avg_ms
 
-    print("RT-HBTNet Benchmark")
-    print("-------------------")
+    print("BT-ShutterNet Benchmark")
+    print("-----------------------")
     print(f"Device: {device}")
     print(f"Input shape: {shape}")
     print(f"Parameters: {count_parameters(model):,}")

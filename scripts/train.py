@@ -4,15 +4,15 @@ import argparse
 import csv
 import random
 import time
-from collections.abc import Sized
 from pathlib import Path
-from typing import Any, cast
+from typing import Any
 
 import numpy as np
 import torch
 import yaml
 from torch import nn
-from torch.utils.data import DataLoader, Dataset, Subset, random_split
+from torch.nn import functional as F
+from torch.utils.data import DataLoader, Dataset, Subset
 from tqdm import tqdm
 
 try:
@@ -21,34 +21,24 @@ except ImportError:
     from _bootstrap import ROOT
 
 from datasets import DatasetFactory
-from models.rt_hbtnet import build_model_from_config
-from utils.metrics import mae, mape, rmse
-
-
-def sync_if_cuda(device: torch.device) -> None:
-    """Synchronize CUDA so timing reflects completed GPU work."""
-
-    if device.type == "cuda":
-        torch.cuda.synchronize(device)
-
-
-def elapsed_since(start: float, device: torch.device) -> float:
-    """Return elapsed wall time after synchronizing pending CUDA kernels."""
-
-    sync_if_cuda(device)
-    return time.perf_counter() - start
+from models.rt_hbtnet import build_model_from_config, count_parameters
+from utils.metrics import alpha_error_report
 
 
 def load_config(path: str | Path) -> dict[str, Any]:
-    """Load a YAML config file."""
-
     with Path(path).open("r", encoding="utf-8") as handle:
         return yaml.safe_load(handle)
 
 
-def set_seed(seed: int) -> None:
-    """Set Python, NumPy, and PyTorch RNG seeds."""
+def resolve_project_path(path_value: str | Path) -> Path:
+    path = Path(path_value)
+    if path.is_absolute():
+        return path
+    cwd_path = Path.cwd() / path
+    return cwd_path if cwd_path.exists() else ROOT / path
 
+
+def set_seed(seed: int) -> None:
     random.seed(seed)
     np.random.seed(seed)
     torch.manual_seed(seed)
@@ -57,519 +47,354 @@ def set_seed(seed: int) -> None:
 
 
 def choose_device(config: dict[str, Any]) -> torch.device:
-    """Choose CUDA automatically when requested and available."""
-
     requested = str(config.get("project", {}).get("device", "auto")).lower()
     if requested == "auto":
         return torch.device("cuda" if torch.cuda.is_available() else "cpu")
     return torch.device(requested)
 
 
-def resolve_project_path(path_value: str | Path) -> Path:
-    """Resolve relative paths against the project root when needed."""
+def split_dataset_by_group(
+    dataset: Dataset[Any],
+    seed: int,
+    val_fraction: float = 0.2,
+) -> tuple[Subset[Any], Subset[Any]]:
+    """Create a leakage-safe split where one scene belongs to one partition."""
 
-    path = Path(path_value)
-    if path.is_absolute():
-        return path
-    cwd_path = Path.cwd() / path
-    if cwd_path.exists():
-        return cwd_path
-    return ROOT / path
+    group_ids = getattr(dataset, "group_ids", None)
+    if not group_ids or len(group_ids) != len(dataset):
+        raise ValueError("Dataset must expose one group_ids entry per sample")
+    groups = sorted(set(str(group) for group in group_ids))
+    if len(groups) < 2:
+        raise ValueError("At least two scenes are required for a scene-disjoint split")
 
-
-def build_dataset(args: argparse.Namespace, config: dict[str, Any]) -> Dataset:
-    """Build the selected dataset."""
-
-    dataset_type = args.dataset
-    labels_csv = None
-    video_root = None
-    if dataset_type in {"video", "video_speed", "labeled_video"}:
-        labels_csv = resolve_project_path(args.labels)
-        video_root = resolve_project_path(args.video_root)
-
-    return DatasetFactory.create(
-        config=config,
-        dataset_type=dataset_type,
-        labels_csv=labels_csv,
-        video_root=video_root,
-        root=None if args.data_root is None else resolve_project_path(args.data_root),
-        manifest_path=None if args.manifest is None else resolve_project_path(args.manifest),
-        split=args.split,
-    )
+    rng = random.Random(int(seed))
+    rng.shuffle(groups)
+    val_group_count = max(1, int(round(len(groups) * float(val_fraction))))
+    val_groups = set(groups[:val_group_count])
+    train_indices = [idx for idx, group in enumerate(group_ids) if str(group) not in val_groups]
+    val_indices = [idx for idx, group in enumerate(group_ids) if str(group) in val_groups]
+    if not train_indices or not val_indices:
+        raise ValueError("Scene-disjoint split produced an empty partition")
+    return Subset(dataset, train_indices), Subset(dataset, val_indices)
 
 
-def split_dataset(dataset: Sized, seed: int) -> tuple[Subset[Any], Subset[Any]]:
-    """Split one dataset into train/validation subsets."""
+def resize_supervision(
+    target: torch.Tensor,
+    size: tuple[int, int],
+    *,
+    mode: str = "bilinear",
+) -> torch.Tensor:
+    if target.shape[-2:] == size:
+        return target
+    if mode == "nearest":
+        return F.interpolate(target, size=size, mode=mode)
+    return F.interpolate(target, size=size, mode=mode, align_corners=False)
 
-    total = len(dataset)
-    if total < 2:
-        raise ValueError("Need at least 2 samples to create a train/val split")
-    val_count = max(1, int(round(total * 0.2)))
-    train_count = total - val_count
-    if train_count < 1:
-        train_count, val_count = 1, total - 1
-    generator = torch.Generator().manual_seed(int(seed))
-    train_set, val_set = random_split(cast(Dataset[Any], dataset), [train_count, val_count], generator=generator)
-    return train_set, val_set
+
+def masked_mean(values: torch.Tensor, mask: torch.Tensor, eps: float = 1.0e-6) -> torch.Tensor:
+    return (values * mask).sum() / (mask.sum() + float(eps))
+
+
+def sign_invariant_vector_error(pred: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
+    positive = (pred - target).square().sum(dim=1, keepdim=True)
+    negative = (pred + target).square().sum(dim=1, keepdim=True)
+    return torch.minimum(positive, negative)
 
 
 def compute_loss(
     pred: dict[str, torch.Tensor],
-    gt: torch.Tensor,
+    batch: dict[str, torch.Tensor | list[str]],
     weights: dict[str, float],
-    branch: str = "joint",
 ) -> tuple[torch.Tensor, dict[str, float]]:
-    """Compute branch-aware L1 losses."""
+    """Multi-task supervision plus the blur-temporal physical constraint."""
 
-    gt = gt.view(-1, 1)
-    l1 = nn.functional.l1_loss
-    tex_loss = l1(pred["speed_tex"], gt)
-    blur_loss = l1(pred["speed_blur"], gt)
-    main_loss = l1(pred["speed"], gt)
+    alpha_gt = batch["alpha"]
+    motion_gt = batch["motion_flow"]
+    blur_gt = batch["blur_flow"]
+    valid = batch["valid_mask"]
+    if not all(isinstance(value, torch.Tensor) for value in (alpha_gt, motion_gt, blur_gt, valid)):
+        raise TypeError("alpha, motion_flow, blur_flow, and valid_mask must be tensors")
 
-    if branch == "temporal":
-        total = tex_loss
-        main_loss = tex_loss.detach()
-    elif branch == "blur":
-        total = blur_loss
-        main_loss = blur_loss.detach()
-    else:
-        total = (
-            float(weights.get("main_weight", 1.0)) * main_loss
-            + float(weights.get("tex_weight", 0.5)) * tex_loss
-            + float(weights.get("blur_weight", 0.5)) * blur_loss
-        )
+    output_size = pred["motion_flow"].shape[-2:]
+    motion_gt = resize_supervision(motion_gt, output_size)
+    blur_gt = resize_supervision(blur_gt, output_size)
+    valid = resize_supervision(valid, output_size, mode="nearest")
 
-    conf_reg_weight = float(weights.get("conf_reg_weight", 0.0))
-    conf_reg = torch.zeros((), device=gt.device)
-    if conf_reg_weight > 0.0:
-        # Confidence target is high when the corresponding branch error is low.
-        tex_conf_target = torch.exp(-torch.abs(pred["speed_tex"] - gt)).detach()
-        blur_conf_target = torch.exp(-torch.abs(pred["speed_blur"] - gt)).detach()
-        if branch == "temporal":
-            conf_reg = l1(pred["conf_tex"], tex_conf_target)
-        elif branch == "blur":
-            conf_reg = l1(pred["conf_blur"], blur_conf_target)
-        else:
-            conf_reg = l1(pred["conf_tex"], tex_conf_target) + l1(pred["conf_blur"], blur_conf_target)
-        if "obs_quality" in pred:
-            # Context quality is high when at least one visual branch has a
-            # reliable observation; it is not supervised as a speed estimate.
-            quality_target = torch.maximum(tex_conf_target, blur_conf_target)
-            if branch == "joint":
-                conf_reg = conf_reg + l1(pred["obs_quality"], quality_target)
-        total = total + conf_reg_weight * conf_reg
+    motion_sq = (pred["motion_flow"] - motion_gt).square().sum(dim=1, keepdim=True)
+    blur_sq = sign_invariant_vector_error(pred["blur_flow"], blur_gt)
+    motion_nll = 0.5 * (torch.exp(-pred["motion_logvar"]) * motion_sq + pred["motion_logvar"])
+    blur_nll = 0.5 * (torch.exp(-pred["blur_logvar"]) * blur_sq + pred["blur_logvar"])
+    motion_loss = masked_mean(motion_nll, valid)
+    blur_loss = masked_mean(blur_nll, valid)
 
+    alpha_gt = alpha_gt.view(-1, 1)
+    alpha_loss = F.smooth_l1_loss(pred["alpha"], alpha_gt, beta=0.02)
+    gt_motion_energy = motion_gt.square().sum(dim=1, keepdim=True)
+    ratio_mask = valid * (gt_motion_energy > 0.05**2).to(valid.dtype)
+    local_alpha_target = alpha_gt[:, :, None, None].expand_as(pred["alpha_map"])
+    local_alpha_error = F.smooth_l1_loss(
+        torch.clamp(pred["alpha_map"], 0.0, 1.0),
+        local_alpha_target,
+        beta=0.02,
+        reduction="none",
+    )
+    local_alpha_loss = masked_mean(local_alpha_error, ratio_mask)
+
+    alpha_field = alpha_gt[:, :, None, None]
+    physics_sq = torch.minimum(
+        (pred["blur_flow"] - alpha_field * pred["motion_flow"]).square().sum(dim=1, keepdim=True),
+        (pred["blur_flow"] + alpha_field * pred["motion_flow"]).square().sum(dim=1, keepdim=True),
+    )
+    physics_loss = masked_mean(torch.sqrt(physics_sq + 1.0e-6), valid)
+
+    direction_dot = (pred["blur_flow"] * pred["motion_flow"]).sum(dim=1, keepdim=True).abs()
+    direction_den = (
+        torch.sqrt(pred["blur_flow"].square().sum(dim=1, keepdim=True) + 1.0e-6)
+        * torch.sqrt(pred["motion_flow"].square().sum(dim=1, keepdim=True) + 1.0e-6)
+    )
+    direction_loss = masked_mean(1.0 - direction_dot / direction_den.clamp_min(1.0e-6), valid)
+
+    total = (
+        float(weights.get("alpha_weight", 1.0)) * alpha_loss
+        + float(weights.get("local_alpha_weight", 0.5)) * local_alpha_loss
+        + float(weights.get("motion_weight", 0.25)) * motion_loss
+        + float(weights.get("blur_weight", 0.25)) * blur_loss
+        + float(weights.get("physics_weight", 0.25)) * physics_loss
+        + float(weights.get("direction_weight", 0.05)) * direction_loss
+    )
     return total, {
-        "main_loss": float(main_loss.detach().cpu()),
-        "tex_loss": float(tex_loss.detach().cpu()),
+        "alpha_loss": float(alpha_loss.detach().cpu()),
+        "local_alpha_loss": float(local_alpha_loss.detach().cpu()),
+        "motion_loss": float(motion_loss.detach().cpu()),
         "blur_loss": float(blur_loss.detach().cpu()),
-        "conf_reg": float(conf_reg.detach().cpu()),
+        "physics_loss": float(physics_loss.detach().cpu()),
+        "direction_loss": float(direction_loss.detach().cpu()),
+    }
+
+
+def move_batch_to_device(
+    batch: dict[str, Any],
+    device: torch.device,
+) -> dict[str, Any]:
+    return {
+        key: value.to(device, non_blocking=True).float() if isinstance(value, torch.Tensor) else value
+        for key, value in batch.items()
     }
 
 
 def run_train_epoch(
     model: nn.Module,
-    loader: DataLoader,
+    loader: DataLoader[Any],
     optimizer: torch.optim.Optimizer,
     device: torch.device,
     loss_weights: dict[str, float],
     epoch: int,
-    branch: str = "joint",
-    profile_timing: bool = False,
 ) -> dict[str, float]:
-    """Run one training epoch and return mean loss values."""
-
     model.train()
-    losses: list[float] = []
-    loss_parts_accum: dict[str, list[float]] = {
-        "main_loss": [],
-        "tex_loss": [],
+    totals: dict[str, list[float]] = {
+        "train_loss": [],
+        "alpha_loss": [],
+        "local_alpha_loss": [],
+        "motion_loss": [],
         "blur_loss": [],
-        "conf_reg": [],
-    }
-    timing = {
-        "train_data_wait_s": 0.0,
-        "train_h2d_s": 0.0,
-        "train_forward_loss_s": 0.0,
-        "train_backward_step_s": 0.0,
+        "physics_loss": [],
+        "direction_loss": [],
     }
     progress = tqdm(loader, desc=f"train {epoch}", leave=False)
-    sync_if_cuda(device)
-    wait_start = time.perf_counter()
-    for x_seq, y_speed in progress:
-        if profile_timing:
-            timing["train_data_wait_s"] += time.perf_counter() - wait_start
-
-        start = time.perf_counter()
-        x_seq = x_seq.to(device, non_blocking=True).float()  # B,T,C,H,W
-        y_speed = y_speed.to(device, non_blocking=True).float()  # B,1
-        if profile_timing:
-            timing["train_h2d_s"] += elapsed_since(start, device)
-
-        start = time.perf_counter()
-        pred = model(x_seq)
-        loss, loss_parts = compute_loss(pred, y_speed, loss_weights, branch=branch)
-        if profile_timing:
-            timing["train_forward_loss_s"] += elapsed_since(start, device)
-
-        start = time.perf_counter()
+    for raw_batch in progress:
+        batch = move_batch_to_device(raw_batch, device)
+        pred = model(batch["frames"])
+        loss, parts = compute_loss(pred, batch, loss_weights)
         optimizer.zero_grad(set_to_none=True)
         loss.backward()
+        torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=5.0)
         optimizer.step()
-        if profile_timing:
-            timing["train_backward_step_s"] += elapsed_since(start, device)
 
-        losses.append(float(loss.detach().cpu()))
-        for name, value in loss_parts.items():
-            loss_parts_accum[name].append(float(value))
-        progress.set_postfix(
-            loss=f"{np.mean(losses):.4f}",
-            main=f"{loss_parts['main_loss']:.4f}",
-        )
-        sync_if_cuda(device)
-        wait_start = time.perf_counter()
-
-    return {
-        "train_loss": float(np.mean(losses)) if losses else 0.0,
-        **{
-            name: float(np.mean(values)) if values else 0.0
-            for name, values in loss_parts_accum.items()
-        },
-        **timing,
-    }
+        totals["train_loss"].append(float(loss.detach().cpu()))
+        for key, value in parts.items():
+            totals[key].append(value)
+        progress.set_postfix(loss=f"{np.mean(totals['train_loss']):.4f}")
+    return {key: float(np.mean(values)) for key, values in totals.items()}
 
 
 @torch.no_grad()
 def evaluate(
     model: nn.Module,
-    loader: DataLoader,
+    loader: DataLoader[Any],
     device: torch.device,
-    branch: str = "joint",
-    profile_timing: bool = False,
 ) -> dict[str, float]:
-    """Evaluate validation metrics."""
-
     model.eval()
-    preds: list[torch.Tensor] = []
-    targets: list[torch.Tensor] = []
-    timing = {
-        "val_data_wait_s": 0.0,
-        "val_h2d_s": 0.0,
-        "val_forward_s": 0.0,
-    }
-    sync_if_cuda(device)
-    wait_start = time.perf_counter()
-    for x_seq, y_speed in tqdm(loader, desc="val", leave=False):
-        if profile_timing:
-            timing["val_data_wait_s"] += time.perf_counter() - wait_start
+    alpha_predictions: list[torch.Tensor] = []
+    alpha_targets: list[torch.Tensor] = []
+    motion_errors: list[float] = []
+    blur_errors: list[float] = []
 
-        start = time.perf_counter()
-        x_seq = x_seq.to(device, non_blocking=True).float()  # B,T,C,H,W
-        y_speed = y_speed.to(device, non_blocking=True).float()  # B,1
-        if profile_timing:
-            timing["val_h2d_s"] += elapsed_since(start, device)
+    for raw_batch in tqdm(loader, desc="val", leave=False):
+        batch = move_batch_to_device(raw_batch, device)
+        pred = model(batch["frames"])
+        alpha_predictions.append(pred["alpha"].detach().cpu().view(-1))
+        alpha_targets.append(batch["alpha"].detach().cpu().view(-1))
 
-        start = time.perf_counter()
-        pred = model(x_seq)
-        if profile_timing:
-            timing["val_forward_s"] += elapsed_since(start, device)
+        size = pred["motion_flow"].shape[-2:]
+        motion_gt = resize_supervision(batch["motion_flow"], size)
+        blur_gt = resize_supervision(batch["blur_flow"], size)
+        valid = resize_supervision(batch["valid_mask"], size, mode="nearest")
+        motion_epe = torch.sqrt(
+            (pred["motion_flow"] - motion_gt).square().sum(dim=1, keepdim=True) + 1.0e-6
+        )
+        blur_epe = torch.sqrt(sign_invariant_vector_error(pred["blur_flow"], blur_gt) + 1.0e-6)
+        motion_errors.append(float(masked_mean(motion_epe, valid).cpu()))
+        blur_errors.append(float(masked_mean(blur_epe, valid).cpu()))
 
-        pred_key = {"joint": "speed", "temporal": "speed_tex", "blur": "speed_blur"}[branch]
-        preds.append(pred[pred_key].detach().cpu().view(-1))
-        targets.append(y_speed.detach().cpu().view(-1))
-        sync_if_cuda(device)
-        wait_start = time.perf_counter()
-
-    pred_all = torch.cat(preds)
-    target_all = torch.cat(targets)
+    report = alpha_error_report(torch.cat(alpha_predictions), torch.cat(alpha_targets))
     return {
-        "mae": mae(pred_all, target_all),
-        "rmse": rmse(pred_all, target_all),
-        "mape": mape(pred_all, target_all),
-        **timing,
+        **{key: float(value) for key, value in report.items() if key != "num_samples"},
+        "motion_epe": float(np.mean(motion_errors)),
+        "blur_epe": float(np.mean(blur_errors)),
     }
 
 
-def save_config_copy(config: dict[str, Any], save_dir: Path) -> None:
-    """Write the resolved training config into the run directory."""
-
-    with (save_dir / "config.yaml").open("w", encoding="utf-8") as handle:
-        yaml.safe_dump(config, handle, sort_keys=False)
-
-
-def write_history_csv(history: list[dict[str, float]], output_path: Path) -> None:
-    """Write per-epoch training history to CSV."""
-
+def write_history(history: list[dict[str, float]], output: Path) -> None:
     if not history:
         return
-    fieldnames = list(history[0].keys())
-    with output_path.open("w", newline="", encoding="utf-8") as handle:
-        writer = csv.DictWriter(handle, fieldnames=fieldnames)
+    with output.open("w", newline="", encoding="utf-8") as handle:
+        writer = csv.DictWriter(handle, fieldnames=list(history[0].keys()))
         writer.writeheader()
         writer.writerows(history)
 
 
-def plot_training_history(history: list[dict[str, float]], output_path: Path) -> None:
-    """Save a PNG chart with training losses and validation metrics."""
-
-    if not history:
-        return
-
-    import matplotlib
-
-    matplotlib.use("Agg")
-    import matplotlib.pyplot as plt
-
-    epochs = [row["epoch"] for row in history]
-    fig, axes = plt.subplots(2, 1, figsize=(10, 8), sharex=True)
-
-    loss_axis = axes[0]
-    for key, label in (
-        ("train_loss", "total"),
-        ("main_loss", "fused"),
-        ("tex_loss", "texture"),
-        ("blur_loss", "blur"),
-        ("conf_reg", "confidence reg"),
-    ):
-        values = [row[key] for row in history]
-        loss_axis.plot(epochs, values, marker="o", linewidth=1.6, label=label)
-    loss_axis.set_title("Training losses")
-    loss_axis.set_ylabel("L1 loss")
-    loss_axis.grid(True, alpha=0.3)
-    loss_axis.legend(loc="best")
-
-    metric_axis = axes[1]
-    metric_axis.plot(epochs, [row["val_mae"] for row in history], marker="o", linewidth=1.6, label="MAE")
-    metric_axis.plot(epochs, [row["val_rmse"] for row in history], marker="o", linewidth=1.6, label="RMSE")
-    metric_axis.set_title("Validation speed error")
-    metric_axis.set_xlabel("Epoch")
-    metric_axis.set_ylabel("m/s")
-    metric_axis.grid(True, alpha=0.3)
-    metric_axis.legend(loc="upper left")
-
-    mape_axis = metric_axis.twinx()
-    mape_axis.plot(
-        epochs,
-        [row["val_mape"] for row in history],
-        color="tab:red",
-        linestyle="--",
-        linewidth=1.4,
-        label="MAPE",
-    )
-    mape_axis.set_ylabel("MAPE (%)")
-    mape_axis.legend(loc="upper right")
-
-    fig.tight_layout()
-    fig.savefig(output_path, dpi=160)
-    plt.close(fig)
-
-
-def configure_branch_training(model: nn.Module, branch: str) -> list[nn.Parameter]:
-    """Freeze modules outside the requested branch and return trainable params."""
-
-    if branch == "joint":
-        for param in model.parameters():
-            param.requires_grad = True
-        return [param for param in model.parameters() if param.requires_grad]
-
-    for param in model.parameters():
-        param.requires_grad = False
-
-    module_names = ["frame_encoder"]
-    if branch == "temporal":
-        module_names.extend(["texture_head", "texture_branch"])
-    elif branch == "blur":
-        module_names.extend(["blur_head", "blur_branch"])
-    else:
-        raise ValueError(f"Unsupported training branch: {branch}")
-
-    for name in module_names:
-        module = getattr(model, name, None)
-        if module is None:
-            continue
-        for param in module.parameters():
-            param.requires_grad = True
-
-    trainable = [param for param in model.parameters() if param.requires_grad]
-    if not trainable:
-        raise RuntimeError(f"No trainable parameters selected for branch '{branch}'")
-    return trainable
-
-
-def total_parameters(model: nn.Module) -> int:
-    """Count all model parameters, including frozen modules."""
-
-    return sum(param.numel() for param in model.parameters())
-
-
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Train RT-HBTNet")
+    parser = argparse.ArgumentParser(description="Train BT-ShutterNet")
     parser.add_argument("--config", default="configs/default.yaml")
-    parser.add_argument(
-        "--dataset",
-        default=None,
-        choices=["video", "paired_blur", "flow_temporal"],
-    )
-    parser.add_argument("--branch", default=None, choices=["joint", "blur", "temporal"])
+    parser.add_argument("--dataset", default="exposure_flow", choices=["exposure_flow"])
     parser.add_argument("--data-root", default=None)
-    parser.add_argument("--manifest", default=None)
     parser.add_argument("--split", default=None)
-    parser.add_argument("--labels", default="data/labels.csv")
-    parser.add_argument("--video-root", default="data/videos")
     parser.add_argument("--epochs", type=int, default=None)
     parser.add_argument("--batch-size", type=int, default=None)
     parser.add_argument("--num-workers", type=int, default=None)
-    parser.add_argument("--save-dir", default="runs/train")
-    parser.add_argument("--no-plots", dest="plots", action="store_false", default=True)
-    parser.add_argument("--profile-timing", action="store_true", help="Print per-epoch timing breakdowns")
+    parser.add_argument(
+        "--prediction-mode",
+        choices=["physics", "direct", "blur_only", "temporal_only"],
+        default=None,
+    )
+    parser.add_argument(
+        "--alpha-only",
+        action="store_true",
+        help="Disable dense cue losses for scalar-regression baselines",
+    )
+    parser.add_argument("--save-dir", default="runs/exposure")
     args = parser.parse_args()
 
-    config_path = resolve_project_path(args.config)
-    config = load_config(config_path)
+    config = load_config(resolve_project_path(args.config))
     train_cfg = config.setdefault("training", {})
-    loss_cfg = train_cfg.setdefault("loss", {})
-    if args.dataset is None:
-        args.dataset = "video"
-    if args.branch is None:
-        args.branch = str(train_cfg.get("branch", "joint"))
-    train_cfg["branch"] = args.branch
-
     if args.epochs is not None:
         train_cfg["epochs"] = int(args.epochs)
     if args.batch_size is not None:
         train_cfg["batch_size"] = int(args.batch_size)
     if args.num_workers is not None:
         train_cfg["num_workers"] = int(args.num_workers)
+    if args.prediction_mode is not None:
+        config.setdefault("model", {})["prediction_mode"] = args.prediction_mode
+    if args.alpha_only:
+        loss_cfg = train_cfg.setdefault("loss", {})
+        loss_cfg["motion_weight"] = 0.0
+        loss_cfg["blur_weight"] = 0.0
+        loss_cfg["physics_weight"] = 0.0
+        loss_cfg["direction_weight"] = 0.0
+        loss_cfg["local_alpha_weight"] = 0.0
+
     seed = int(config.get("project", {}).get("seed", 42))
     set_seed(seed)
     device = choose_device(config)
+    data_cfg = config.get("data", {}).get("datasets", {}).get("exposure_flow", {})
+    root = resolve_project_path(args.data_root or data_cfg.get("root", "data/raw/sintel"))
+    dataset = DatasetFactory.create(
+        config=config,
+        dataset_type=args.dataset,
+        root=root,
+        split=args.split or data_cfg.get("split", "training"),
+    )
+    train_set, val_set = split_dataset_by_group(
+        dataset,
+        seed=seed,
+        val_fraction=float(train_cfg.get("val_fraction", 0.2)),
+    )
 
-    dataset = cast(Sized, build_dataset(args, config))
-    train_set, val_set = split_dataset(dataset, seed)
     batch_size = int(train_cfg.get("batch_size", 8))
     num_workers = int(train_cfg.get("num_workers", 2))
-    train_loader = DataLoader(
-        train_set,
-        batch_size=batch_size,
-        shuffle=True,
-        num_workers=num_workers,
-        persistent_workers=num_workers > 0,
-        pin_memory=device.type == "cuda",
-    )
-    val_loader = DataLoader(
-        val_set,
-        batch_size=batch_size,
-        shuffle=False,
-        num_workers=num_workers,
-        persistent_workers=num_workers > 0,
-        pin_memory=device.type == "cuda",
-    )
+    loader_options = {
+        "batch_size": batch_size,
+        "num_workers": num_workers,
+        "persistent_workers": num_workers > 0,
+        "pin_memory": device.type == "cuda",
+    }
+    train_loader = DataLoader(train_set, shuffle=True, **loader_options)
+    val_loader = DataLoader(val_set, shuffle=False, **loader_options)
 
     model = build_model_from_config(config).to(device)
-    trainable_params = configure_branch_training(model, args.branch)
     optimizer = torch.optim.AdamW(
-        trainable_params,
-        lr=float(train_cfg.get("lr", 1.0e-3)),
-        weight_decay=float(train_cfg.get("weight_decay", 1.0e-5)),
+        model.parameters(),
+        lr=float(train_cfg.get("lr", 2.0e-4)),
+        weight_decay=float(train_cfg.get("weight_decay", 1.0e-4)),
+    )
+    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+        optimizer,
+        T_max=max(1, int(train_cfg.get("epochs", 30))),
     )
 
     save_dir = resolve_project_path(args.save_dir)
     save_dir.mkdir(parents=True, exist_ok=True)
-    save_config_copy(config, save_dir)
+    with (save_dir / "config.yaml").open("w", encoding="utf-8") as handle:
+        yaml.safe_dump(config, handle, sort_keys=False)
 
     print(f"device: {device}")
-    print(f"dataset: {args.dataset} train={len(train_set)} val={len(val_set)}")
-    print(f"branch: {args.branch}")
-    print(f"parameters: total={total_parameters(model)} trainable={sum(p.numel() for p in trainable_params)}")
+    print(f"train={len(train_set)} val={len(val_set)} (scene-disjoint)")
+    print(f"parameters: {count_parameters(model):,}")
 
     best_mae = float("inf")
-    epochs = int(train_cfg.get("epochs", 20))
     history: list[dict[str, float]] = []
-    history_path = save_dir / "history.csv"
-    chart_path = save_dir / "training_curves.png"
+    epochs = int(train_cfg.get("epochs", 30))
     for epoch in range(1, epochs + 1):
-        epoch_start = time.perf_counter()
-        train_start = time.perf_counter()
+        start = time.perf_counter()
         train_metrics = run_train_epoch(
             model,
             train_loader,
             optimizer,
             device,
-            loss_cfg,
+            train_cfg.get("loss", {}),
             epoch,
-            branch=args.branch,
-            profile_timing=bool(args.profile_timing),
         )
-        train_elapsed = elapsed_since(train_start, device)
-
-        val_start = time.perf_counter()
-        val_metrics = evaluate(model, val_loader, device, branch=args.branch, profile_timing=bool(args.profile_timing))
-        val_elapsed = elapsed_since(val_start, device)
-        epoch_history = {
+        val_metrics = evaluate(model, val_loader, device)
+        scheduler.step()
+        row = {
             "epoch": float(epoch),
             **train_metrics,
-            "val_mae": float(val_metrics["mae"]),
-            "val_rmse": float(val_metrics["rmse"]),
-            "val_mape": float(val_metrics["mape"]),
-            "epoch_time_s": 0.0,
-            "train_time_s": train_elapsed,
-            "val_time_s": val_elapsed,
-            "artifact_time_s": 0.0,
+            **{f"val_{key}": value for key, value in val_metrics.items()},
+            "lr": float(optimizer.param_groups[0]["lr"]),
+            "epoch_time_s": float(time.perf_counter() - start),
         }
-        history.append(epoch_history)
-        artifact_start = time.perf_counter()
-        write_history_csv(history, history_path)
-        if args.plots:
-            plot_training_history(history, chart_path)
-        artifact_elapsed = elapsed_since(artifact_start, device)
-        epoch_history["artifact_time_s"] = artifact_elapsed
-
+        history.append(row)
+        write_history(history, save_dir / "history.csv")
         print(
-            f"epoch={epoch:03d} "
-            f"train_loss={train_metrics['train_loss']:.4f} "
-            f"val_mae={val_metrics['mae']:.4f} "
-            f"val_rmse={val_metrics['rmse']:.4f} "
-            f"val_mape={val_metrics['mape']:.2f}"
+            f"epoch={epoch:03d} loss={row['train_loss']:.4f} "
+            f"alpha_mae={row['val_alpha_mae']:.4f} "
+            f"motion_epe={row['val_motion_epe']:.3f} "
+            f"blur_epe={row['val_blur_epe']:.3f}"
         )
-        print(f"saved history: {history_path}")
-        if args.plots:
-            print(f"saved chart: {chart_path}")
 
         checkpoint = {
             "epoch": epoch,
             "model": model.state_dict(),
             "optimizer": optimizer.state_dict(),
+            "scheduler": scheduler.state_dict(),
             "config": config,
             "val_metrics": val_metrics,
         }
         torch.save(checkpoint, save_dir / "last.pt")
-        if val_metrics["mae"] < best_mae:
-            best_mae = val_metrics["mae"]
+        if val_metrics["alpha_mae"] < best_mae:
+            best_mae = val_metrics["alpha_mae"]
             torch.save(checkpoint, save_dir / "best.pt")
-        epoch_history["epoch_time_s"] = elapsed_since(epoch_start, device)
-        write_history_csv(history, history_path)
-        if args.profile_timing:
-            print(
-                "timing: "
-                f"epoch={epoch_history['epoch_time_s']:.2f}s "
-                f"train={train_elapsed:.2f}s "
-                f"val={val_elapsed:.2f}s "
-                f"artifacts={artifact_elapsed:.2f}s"
-            )
-            print(
-                "train detail: "
-                f"data_wait={train_metrics['train_data_wait_s']:.2f}s "
-                f"h2d={train_metrics['train_h2d_s']:.2f}s "
-                f"forward_loss={train_metrics['train_forward_loss_s']:.2f}s "
-                f"backward_step={train_metrics['train_backward_step_s']:.2f}s"
-            )
-            print(
-                "val detail: "
-                f"data_wait={val_metrics['val_data_wait_s']:.2f}s "
-                f"h2d={val_metrics['val_h2d_s']:.2f}s "
-                f"forward={val_metrics['val_forward_s']:.2f}s"
-            )
+
 
 if __name__ == "__main__":
     main()

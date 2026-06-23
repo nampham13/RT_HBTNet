@@ -2,134 +2,83 @@ from __future__ import annotations
 
 import torch
 
-from models.blur_physics_branch import BlurPhysicsBranch, BlurPhysicsDescriptor
+from models import BTShutterNet
 from models.blocks import TemporalShift
-from models.rt_hbtnet import TemporalTextureHead
-from models import RTHBTNet
-from models.temporal_texture_branch import TemporalTextureBranch
+from models.rt_hbtnet import ExposurePhysicsLayer
 
 
-def test_model_shapes_and_confidence_ranges() -> None:
-    model = RTHBTNet().eval()
-    x = torch.rand(2, 64, 1, 64, 128)  # B,T,C,H,W
+def test_model_outputs_dense_cues_and_exposure_fraction() -> None:
+    model = BTShutterNet(
+        feature_dim=16,
+        encoder_truncate_at=2,
+        temporal_num_blocks=1,
+    ).eval()
+    x = torch.rand(2, 5, 1, 32, 48)
 
     with torch.no_grad():
         out = model(x)
 
-    expected_keys = {
-        "speed",
-        "conf_final",
-        "speed_tex",
-        "conf_tex",
-        "speed_blur",
-        "conf_blur",
-        "w_tex",
-        "w_blur",
-        "obs_quality",
-        "context_bias_tex",
-        "context_bias_blur",
-    }
-    assert expected_keys.issubset(out.keys())
-
-    for key in expected_keys:
-        assert out[key].shape == (2, 1)
-
-    for key in ("conf_final", "conf_tex", "conf_blur", "w_tex", "w_blur", "obs_quality"):
-        assert torch.all(out[key] >= 0.0)
-        assert torch.all(out[key] <= 1.0)
+    assert out["alpha"].shape == (2, 1)
+    assert out["confidence"].shape == (2, 1)
+    assert out["motion_flow"].shape[0:2] == (2, 2)
+    assert out["blur_flow"].shape == out["motion_flow"].shape
+    assert out["motion_logvar"].shape[0:2] == (2, 1)
+    assert out["blur_logvar"].shape == out["motion_logvar"].shape
+    assert out["alpha_map"].shape == out["motion_logvar"].shape
+    assert out["physics_weight"].shape == out["motion_logvar"].shape
+    assert out["context_quality"].shape == out["motion_logvar"].shape
+    assert torch.all(out["alpha"] >= 0.0)
+    assert torch.all(out["alpha"] <= 1.0)
+    assert torch.all(out["confidence"] >= 0.0)
+    assert torch.all(out["confidence"] <= 1.0)
 
 
-def test_model_without_context_omits_context_outputs() -> None:
-    model = RTHBTNet(use_context=False).eval()
-    x = torch.rand(2, 8, 1, 64, 128)  # B,T,C,H,W
-
-    with torch.no_grad():
-        out = model(x)
-
-    assert "obs_quality" not in out
-    assert "context_bias_tex" not in out
-    assert "context_bias_blur" not in out
-
-
-def test_blur_physics_descriptor_adds_fft_and_directional_features() -> None:
-    descriptor = BlurPhysicsDescriptor(in_channels=1)
-    x = torch.rand(2, 1, 32, 48)
-
-    spatial, summary = descriptor(x)
-
-    assert descriptor.fft_feature_dim == 6
-    assert descriptor.directional_feature_dim == 5
-    assert spatial.shape == (2, descriptor.spatial_descriptor_channels, 32, 48)
-    assert summary.shape == (2, descriptor.summary_dim)
-    assert torch.isfinite(summary).all()
-
-
-def test_legacy_blur_physics_branch_shapes() -> None:
-    branch = BlurPhysicsBranch(
-        in_channels=1,
-        base_channels=8,
+def test_model_can_disable_context_quality() -> None:
+    model = BTShutterNet(
         feature_dim=16,
-        dropout=0.0,
+        encoder_truncate_at=2,
+        temporal_num_blocks=1,
+        use_context_quality=False,
     ).eval()
-    x = torch.rand(2, 1, 32, 48)
-
     with torch.no_grad():
-        out = branch(x)
-
-    assert out["speed_blur"].shape == (2, 1)
-    assert out["conf_blur"].shape == (2, 1)
-    assert out["blur_features"].shape == (2, 16)
-    assert torch.all(out["conf_blur"] >= 0.0)
-    assert torch.all(out["conf_blur"] <= 1.0)
+        out = model(torch.rand(1, 3, 1, 32, 48))
+    assert "context_quality" not in out
 
 
-def test_temporal_texture_head_accepts_feature_maps() -> None:
-    head = TemporalTextureHead(
+def test_direct_alpha_ablation_keeps_physics_diagnostic() -> None:
+    model = BTShutterNet(
         feature_dim=16,
-        num_temporal_blocks=1,
-        pool_scales=(1, 2),
+        encoder_truncate_at=2,
+        temporal_num_blocks=1,
+        prediction_mode="direct",
     ).eval()
-    frame_maps = torch.rand(2, 5, 16, 8, 12)  # B,T,D,H,W
-
     with torch.no_grad():
-        out = head(frame_maps)
-
-    assert out["speed_tex"].shape == (2, 1)
-    assert out["conf_tex"].shape == (2, 1)
-    assert out["texture_features"].shape == (2, 16)
-    assert torch.all(out["conf_tex"] >= 0.0)
-    assert torch.all(out["conf_tex"] <= 1.0)
-
-    frame_vectors = torch.rand(2, 5, 16)  # B,T,D
-    with torch.no_grad():
-        vector_out = head(frame_vectors)
-    assert vector_out["speed_tex"].shape == (2, 1)
-    assert vector_out["texture_features"].shape == (2, 16)
+        out = model(torch.rand(2, 3, 1, 32, 48))
+    assert out["alpha"].shape == (2, 1)
+    assert out["alpha_physics"].shape == (2, 1)
+    assert model.scalar_head is not None
+    assert torch.all(out["alpha"] >= 0.0)
+    assert torch.all(out["alpha"] <= 1.0)
 
 
-def test_legacy_temporal_texture_branch_uses_clip_inputs() -> None:
-    branch = TemporalTextureBranch(
-        in_channels=1,
-        base_channels=8,
-        temporal_hidden=16,
-        num_temporal_blocks=1,
-        pool_scales=(1, 2),
-    ).eval()
-    x = torch.rand(2, 5, 1, 48, 96)  # B,T,C,H,W
+def test_physics_layer_recovers_known_fraction_with_sign_ambiguity() -> None:
+    physics = ExposurePhysicsLayer(min_motion_px=0.0)
+    motion = torch.zeros(2, 2, 4, 6)
+    motion[:, 0] = 3.0
+    motion[:, 1] = 4.0
+    blur = 0.4 * motion
+    blur[1] *= -1.0
+    zeros = torch.zeros(2, 1, 4, 6)
 
-    with torch.no_grad():
-        out = branch(x)
+    out = physics(motion, blur, zeros, zeros)
 
-    assert out["speed_tex"].shape == (2, 1)
-    assert out["conf_tex"].shape == (2, 1)
-    assert out["texture_features"].shape == (2, 16)
+    assert torch.allclose(out["alpha"], torch.full((2, 1), 0.4), atol=1.0e-5)
+    assert torch.all(out["physics_residual"] < 1.0e-4)
 
 
 def test_temporal_shift_has_no_parameters_and_keeps_shape() -> None:
     shift = TemporalShift(fold_div=4)
-    x = torch.arange(1 * 8 * 4 * 1 * 1, dtype=torch.float32).reshape(1, 8, 4, 1, 1)
-
+    x = torch.arange(1 * 8 * 4, dtype=torch.float32).reshape(1, 8, 4, 1, 1)
     out = shift(x)
-
     assert sum(param.numel() for param in shift.parameters()) == 0
     assert out.shape == x.shape

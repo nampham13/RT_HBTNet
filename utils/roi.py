@@ -99,7 +99,7 @@ def _expand_roi(frame_shape: tuple[int, ...], roi: ROI, margin_ratio: float) -> 
 
 
 def detect_motion_rois(frames: Iterable[np.ndarray], config: dict[str, Any]) -> list[ROI]:
-    """Detect conveyor ROIs from short-term motion and texture energy.
+    """Detect informative ROIs from short-term motion and texture energy.
 
     The detector is intentionally lightweight: it accumulates frame differences
     and Sobel texture energy, thresholds the combined score map, then returns

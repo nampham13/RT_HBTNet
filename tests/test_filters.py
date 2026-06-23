@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from utils.filters import EMAFilter, SimpleKalmanFilter1D
+from utils.filters import EMAFilter
 
 
 def test_ema_first_update() -> None:
@@ -12,10 +12,8 @@ def test_ema_smoothing() -> None:
     filt = EMAFilter(alpha=0.5)
     filt.update(10.0)
     assert filt.update(20.0) == 15.0
-
-
-def test_kalman_does_not_crash() -> None:
-    filt = SimpleKalmanFilter1D(process_noise=0.01, measurement_noise=0.1)
-    value = filt.update(1.0)
-    value = filt.update(1.2)
-    assert isinstance(value, float)
+def test_ema_reset() -> None:
+    filt = EMAFilter(alpha=0.5)
+    filt.update(10.0)
+    filt.reset()
+    assert filt.update(20.0) == 20.0

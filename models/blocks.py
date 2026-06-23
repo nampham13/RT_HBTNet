@@ -296,7 +296,7 @@ def _last_conv_out_channels(module: nn.Module) -> int:
 
 
 class MobileNetV3SmallFrameEncoder(nn.Module):
-    """Truncated MobileNetV3-Small frame encoder for small conveyor ROIs.
+    """Truncated MobileNetV3-Small encoder preserving low-level motion cues.
 
     The default truncation keeps MobileNetV3-Small features up to total stride
     8. For a 64x128 ROI this leaves an 8x16 feature map before pooling, which
