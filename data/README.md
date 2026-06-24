@@ -1,65 +1,136 @@
-# Data layout
+# Minimal data layout
 
-## MPI Sintel-style supervised training
+Giữ đơn giản nhất có thể. Bạn chỉ cần nhớ 3 thư mục:
 
 ```text
-data/raw/sintel/
+data/
+  sintel/          # train/val synthetic blur từ frame + optical flow
+  bsd/             # evaluate video thật có exposure metadata
+  toy_exposure/    # smoke test, tự sinh bằng script
+```
+
+Trong đó:
+
+- `data/sintel/` dùng cho training chính.
+- `data/bsd/` dùng cho benchmark/evaluation thật.
+- `data/toy_exposure/` chỉ dùng kiểm tra code, không báo cáo trong paper.
+
+## 1. Training data: `data/sintel`
+
+Code hiện tại đọc trực tiếp layout kiểu MPI Sintel:
+
+```text
+data/sintel/
   training/
     final/
-      alley_1/
+      <scene>/
         frame_0001.png
+        frame_0002.png
         ...
     flow/
-      alley_1/
+      <scene>/
         frame_0001.flo
+        frame_0002.flo
         ...
 ```
 
-The adapter scans odd-length clips and synthesizes a random exposure fraction
-for each sample. Configuration lives under `data.datasets.exposure_flow`.
-
-Important controls:
-
-- `alpha_min`, `alpha_max`: training exposure range.
-- `integration_samples`: samples used for exposure integration.
-- `samples_per_clip`: deterministic alpha variants per source clip.
-- `stride`: source-window stride.
-- `max_flow`: invalid-flow rejection threshold.
-
-Do not use random frame-level train/validation splitting. Scenes are the
-independent statistical units.
-
-## Beam-Splitter Dataset
-
-BSD should be kept separately, for example:
+Ví dụ:
 
 ```text
-data/raw/bsd/
+data/sintel/training/final/alley_1/frame_0001.png
+data/sintel/training/flow/alley_1/frame_0001.flo
 ```
 
-Its real exposure settings should be used for final testing and optional
-scene-disjoint adaptation. Do not tune hyperparameters on the reported test
-clips.
+Training command:
 
-Create a CSV manifest:
+```powershell
+python scripts/train.py --config configs/default.yaml
+```
+
+Nếu bạn để dataset ở chỗ khác:
+
+```powershell
+python scripts/train.py --config configs/default.yaml --data-root path/to/sintel
+```
+
+Loader sẽ tự sinh blur với nhiều giá trị exposure fraction `alpha`, nên không
+cần label speed.
+
+## 2. Real benchmark: `data/bsd`
+
+Với Beam-Splitter Dataset hoặc video thật có exposure time:
+
+```text
+data/bsd/
+  videos/
+    clip_0001.mp4
+    clip_0002.mp4
+  manifest.csv
+```
+
+`manifest.csv`:
 
 ```csv
 video_path,exposure_time_ms,fps,start_frame,end_frame,scene
-clips/example.mp4,8,15,0,99,scene_001
+videos/clip_0001.mp4,8.0,15,0,99,bsd_scene_001
+videos/clip_0002.mp4,4.0,30,0,149,bsd_scene_002
 ```
 
-Evaluate with:
+Chỉ hai cột bắt buộc:
+
+```csv
+video_path,exposure_time_ms
+```
+
+Các cột `fps,start_frame,end_frame,scene` là optional, nhưng nên có `fps` và
+`scene` để evaluation rõ ràng hơn.
+
+Evaluation command:
 
 ```powershell
-python scripts/evaluate.py --config configs/default.yaml --weights runs/exposure/best.pt --dataset exposure_video --data-root data/raw/bsd --manifest data/raw/bsd/manifest.csv
+python scripts/evaluate.py ^
+  --config configs/default.yaml ^
+  --weights runs/exposure/best.pt ^
+  --dataset exposure_video ^
+  --data-root data/bsd ^
+  --manifest data/bsd/manifest.csv ^
+  --output runs/exposure/bsd_report.json
 ```
 
-## Toy data
+## 3. Smoke test: `data/toy_exposure`
 
-`scripts/make_toy_exposure_data.py` writes:
+Tạo toy data:
+
+```powershell
+python scripts/make_toy_exposure_data.py
+```
+
+Chạy thử:
+
+```powershell
+python scripts/train.py --config configs/smoke.yaml --epochs 1 --num-workers 0
+```
+
+Toy data chỉ để xem pipeline có chạy không. Không dùng làm benchmark result.
+
+## 4. Nếu dùng dataset khác
+
+Đừng tạo thêm nhiều nhánh thư mục. Chọn một trong hai cách:
+
+1. Nếu dataset có optical flow, convert về layout `data/sintel/...`.
+2. Nếu dataset là video thật có exposure time, đặt vào `data/bsd/...` và viết
+   `manifest.csv`.
+
+Vậy là đủ cho hướng hiện tại.
+
+## 5. Không commit data thật
+
+Các thư mục dataset lớn được ignore bởi Git:
 
 ```text
+data/sintel/
+data/bsd/
 data/toy_exposure/
 ```
 
-This data validates code paths only. It is not an experimental benchmark.
+Chỉ commit code, config, README và protocol.

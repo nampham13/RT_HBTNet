@@ -13,7 +13,7 @@ data:
   normalize: true
   datasets:
     exposure_flow:
-      root: "data/raw/sintel"
+      root: "data/sintel"
       split: "training"
       image_subdir: "final"
       flow_subdir: "flow"

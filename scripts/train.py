@@ -307,7 +307,7 @@ def main() -> None:
     set_seed(seed)
     device = choose_device(config)
     data_cfg = config.get("data", {}).get("datasets", {}).get("exposure_flow", {})
-    root = resolve_project_path(args.data_root or data_cfg.get("root", "data/raw/sintel"))
+    root = resolve_project_path(args.data_root or data_cfg.get("root", "data/sintel"))
     dataset = DatasetFactory.create(
         config=config,
         dataset_type=args.dataset,

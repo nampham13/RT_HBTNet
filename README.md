@@ -58,7 +58,7 @@ The implemented training adapter uses frame sequences with Middlebury
 `.flo` ground truth, such as MPI Sintel:
 
 ```text
-data/raw/sintel/
+data/sintel/
   training/
     final/<scene>/frame_XXXX.png
     flow/<scene>/frame_XXXX.flo
@@ -104,7 +104,7 @@ research result.
 python scripts/train.py ^
   --config configs/default.yaml ^
   --dataset exposure_flow ^
-  --data-root data/raw/sintel ^
+  --data-root data/sintel ^
   --save-dir runs/exposure
 ```
 
@@ -121,8 +121,8 @@ python scripts/evaluate.py ^
   --config configs/default.yaml ^
   --weights runs/exposure/best.pt ^
   --dataset exposure_video ^
-  --data-root data/raw/bsd ^
-  --manifest data/raw/bsd/manifest.csv ^
+  --data-root data/bsd ^
+  --manifest data/bsd/manifest.csv ^
   --output runs/exposure/bsd_report.json
 ```
 

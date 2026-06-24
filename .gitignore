@@ -4,6 +4,8 @@ __pycache__/
 .pytest_cache/
 
 data/raw/
+data/sintel/
+data/bsd/
 data/toy_exposure/
 runs/
 *.pt

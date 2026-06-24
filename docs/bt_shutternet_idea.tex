@@ -1,0 +1,385 @@
+% !TEX program = xelatex
+% Compile with: xelatex bt_shutternet_idea.tex
+%
+% Ghi chú: đây là bản trình bày ý tưởng nghiên cứu, không phải bản paper cuối.
+% Các kết quả toy/engineering nếu được nhắc tới chỉ dùng để kiểm tra pipeline,
+% tuyệt đối không trình bày như benchmark result.
+
+\documentclass[11pt,a4paper]{article}
+
+\usepackage[a4paper,margin=1in]{geometry}
+\usepackage{fontspec}
+\IfFontExistsTF{Times New Roman}
+  {\setmainfont{Times New Roman}}
+  {\setmainfont{TeX Gyre Termes}}
+\usepackage{amsmath,amssymb}
+\usepackage{booktabs}
+\usepackage{enumitem}  
+\usepackage{xcolor}
+\usepackage{hyperref}
+\usepackage{microtype}
+
+\hypersetup{
+  colorlinks=true,
+  linkcolor=blue!60!black,
+  citecolor=blue!60!black,
+  urlcolor=blue!60!black
+}
+
+\title{\textbf{BT-ShutterNet: Ước lượng tỉ lệ phơi sáng từ video mờ bằng liên kết vật lý giữa Blur và Temporal Texture}}
+\author{Idea note for ACCV submission}
+\date{June 23, 2026}
+
+\newcommand{\alphagt}{\alpha^{\star}}
+\newcommand{\alphahat}{\hat{\alpha}}
+\newcommand{\vect}[1]{\mathbf{#1}}
+
+\begin{document}
+\maketitle
+
+\begin{abstract}
+Pipeline ban đầu đặt mục tiêu ước lượng tốc độ tuyệt đối của vật thể từ hai nhánh: blur và temporal texture. Tuy nhiên, bài toán đó không khả thi với phần lớn public dataset vì thiếu đồng thời tốc độ màn trập, scale hình học và ground-truth speed. Bản thiết kế mới giữ lại lõi khoa học quan trọng nhất: \emph{blur chứa thông tin về quãng dịch chuyển trong thời gian phơi sáng}, còn \emph{temporal texture chứa thông tin về dịch chuyển giữa các frame}. Thay vì dự đoán speed, mô hình dự đoán \textbf{exposure fraction}:
+\[
+    \alpha = \frac{t_{\mathrm{exposure}}}{t_{\mathrm{frame}}} \in [0,1],
+    \qquad
+    \theta = 360^\circ \alpha,
+\]
+tức shutter angle đã chuẩn hoá theo frame interval. Với giả thiết vận tốc cục bộ gần hằng trong thời gian phơi sáng, blur displacement $\vect b$ và inter-frame displacement $\vect d$ thoả:
+\[
+    \vect b \simeq \alpha \vect d.
+\]
+BT-ShutterNet học hai trường vector dày đặc $(\vect b,\vect d)$ và bản đồ độ tin cậy, sau đó dùng một lớp vật lý không học tham số để suy ra $\alpha$. Thiết kế này tránh yêu cầu speed label, dùng được dataset công khai có optical-flow ground truth hoặc high-FPS video để sinh blur có kiểm soát, và có thể so sánh trực tiếp trên Beam-Splitter Dataset với các phương pháp shutter-angle estimation trước đó.
+\end{abstract}
+
+\section{Vấn đề của pipeline cũ}
+
+Pipeline cũ dựa trên giả định rằng mô hình có thể học tương quan giữa chiều dài blur, temporal texture và tốc độ thật của vật thể. Ý tưởng này trực giác tốt, nhưng vướng ba nút thắt lớn.
+
+\paragraph{Thiếu tính định danh vật lý.}
+Độ dài blur quan sát được không quyết định duy nhất speed:
+\[
+    \|\vect b\| \approx v_{\mathrm{image}} \cdot t_{\mathrm{exposure}}.
+\]
+Nếu không biết thời gian phơi sáng $t_{\mathrm{exposure}}$, cùng một blur có thể đến từ vật thể nhanh với exposure ngắn hoặc vật thể chậm với exposure dài. Nếu muốn đổi sang tốc độ metric m/s, ta còn cần depth, camera calibration, scene scale và hướng chuyển động 3D. Các đại lượng này hầu như không có trong dataset video blur thông dụng.
+
+\paragraph{Dataset công khai không khớp mục tiêu speed.}
+Các bộ dữ liệu phổ biến cho deblurring hoặc optical flow thường có sharp/blur frame, high-FPS frame hoặc flow, nhưng không có ground-truth speed vật thể theo đơn vị vật lý. Một số dataset có thông tin exposure hoặc shutter angle, nhưng không đồng thời có speed GT. Do đó, nếu giữ mục tiêu speed, training supervision sẽ hoặc bị thiếu, hoặc phải dựa vào pseudo-label yếu, làm claim khoa học rất rủi ro.
+
+\paragraph{Fusion hai scalar dễ học shortcut.}
+Nếu nhánh blur và nhánh temporal texture cùng xuất scalar speed rồi fusion, mô hình có thể học bias của dataset thay vì học quan hệ vật lý. Ví dụ, nó có thể dựa vào texture, contrast, object category hoặc camera motion pattern. Điều này làm kết quả validation có vẻ tốt nhưng khó tổng quát sang video thật.
+
+\paragraph{Vấn đề liêm chính khoa học.}
+Với bài toán thiếu label nền tảng, việc báo cáo speed accuracy trên pseudo-label hoặc toy data rất dễ tạo claim quá mức. Vì vậy, pipeline nên chuyển sang một biến mục tiêu có thể định nghĩa, đo và kiểm chứng bằng public dataset.
+
+\section{Bài toán đề xuất}
+
+Thay vì ước lượng speed metric, ta ước lượng \textbf{exposure fraction}:
+\[
+    \alpha = \frac{t_{\mathrm{exposure}}}{t_{\mathrm{frame}}}.
+\]
+Đây là đại lượng không cần camera calibration hay scale 3D. Nếu biết FPS của video, có thể suy ra exposure time:
+\[
+    \hat{t}_{\mathrm{exposure}} = \alphahat \cdot \frac{1}{\mathrm{FPS}}.
+\]
+
+Mục tiêu mới vẫn giữ đúng linh hồn của ý tưởng ban đầu:
+\begin{itemize}[leftmargin=1.5em]
+    \item nhánh temporal texture học dịch chuyển giữa các frame;
+    \item nhánh blur học độ dài/hướng blur trong frame bị mờ;
+    \item mô hình khai thác tỉ lệ giữa hai tín hiệu này để suy ra thông tin về shutter.
+\end{itemize}
+
+\section{Trực giác vật lý}
+
+Xét một điểm ảnh hoặc patch cục bộ $i$ có chuyển động gần tuyến tính trong một frame interval. Gọi $\vect d_i$ là displacement giữa hai frame liên tiếp và $\vect b_i$ là displacement tương đương của blur trong thời gian phơi sáng. Khi vận tốc cục bộ gần hằng:
+\[
+    \vect b_i \simeq \alpha \vect d_i.
+\]
+Do blur kernel tuyến tính thường mơ hồ dấu hướng, ta dùng dạng chiếu sign-invariant:
+\[
+    \alphahat =
+    \mathrm{clip}_{[0,1]}
+    \frac{\sum_i w_i \left| \hat{\vect b}_i^\top \hat{\vect d}_i \right|}
+         {\sum_i w_i \|\hat{\vect d}_i\|_2^2 + \varepsilon},
+\]
+trong đó $w_i$ là trọng số độ tin cậy học được từ texture, saturation, motion magnitude và tính nhất quán blur--motion. Công thức này là weighted least squares cho quan hệ $\vect b \approx \alpha \vect d$.
+
+\section{Kiến trúc đề xuất}
+
+\begin{center}
+\fbox{
+\begin{minipage}{0.92\linewidth}
+\centering
+Blurred clip $(B,T,C,H,W)$\\[0.4em]
+$\downarrow$\\
+Shared lightweight encoder\\[0.4em]
+$\swarrow$ \hfill $\searrow$\\[-0.2em]
+Temporal texture branch \hfill Blur branch\\
+predicts $\hat{\vect d}$, uncertainty \hfill predicts $\hat{\vect b}$, uncertainty\\[0.4em]
+$\searrow$ \hfill $\swarrow$\\[-0.2em]
+Context/quality weighting $w$\\[0.4em]
+$\downarrow$\\
+Non-learned physics layer: $\vect b \simeq \alpha \vect d$\\[0.4em]
+$\downarrow$\\
+Exposure fraction $\alphahat$ and shutter angle $\hat{\theta}=360^\circ\alphahat$
+\end{minipage}
+}
+\end{center}
+
+\subsection{Temporal texture branch}
+
+Nhánh temporal nhận chuỗi frame mờ và học trường dịch chuyển giữa các frame quanh frame trung tâm:
+\[
+    \hat{\vect d} = f_{\mathrm{temp}}(I_{t-k:t+k}).
+\]
+Nhánh này không cần dự đoán speed. Vai trò của nó là cung cấp đơn vị chuẩn theo frame interval: vật thể đã dịch chuyển bao nhiêu pixel từ frame này sang frame kế tiếp.
+
+\subsection{Blur branch}
+
+Nhánh blur tập trung vào frame trung tâm và các descriptor định hướng như gradient, edge hoặc directional blur cue:
+\[
+    \hat{\vect b} = f_{\mathrm{blur}}(I_t, \nabla I_t).
+\]
+Nó học displacement tương đương bên trong thời gian phơi sáng. Vì blur direction có thể mơ hồ dấu, loss và physics layer cần xử lý sign ambiguity.
+
+\subsection{Context quality branch}
+
+Không phải pixel nào cũng đáng tin. Vùng texture thấp, saturation, occlusion, motion boundary hoặc blur quá nhỏ đều làm tỉ lệ $\|\vect b\|/\|\vect d\|$ nhiễu. Vì vậy, context branch học trọng số:
+\[
+    w_i = f_{\mathrm{quality}}(I_{t-k:t+k}, \hat{\vect d}_i, \hat{\vect b}_i).
+\]
+Trọng số này không chỉ giúp tăng accuracy mà còn cung cấp confidence để báo cáo risk--coverage, rất quan trọng nếu muốn claim mô hình hữu dụng trong thực tế.
+
+\section{Loss function}
+
+Với dữ liệu synthetic có optical flow GT, ta biết $\vect d_i^\star$ và tạo blur target:
+\[
+    \vect b_i^\star = \alphagt \vect d_i^\star.
+\]
+Tổng loss:
+\[
+    \mathcal{L}
+    =
+    \lambda_\alpha \mathcal{L}_\alpha
+    + \lambda_d \mathcal{L}_{\mathrm{motion}}
+    + \lambda_b \mathcal{L}_{\mathrm{blur}}
+    + \lambda_p \mathcal{L}_{\mathrm{physics}}
+    + \lambda_{\mathrm{dir}} \mathcal{L}_{\mathrm{direction}}.
+\]
+
+\paragraph{Alpha loss.}
+\[
+    \mathcal{L}_\alpha = |\alphahat - \alphagt|.
+\]
+
+\paragraph{Temporal motion loss.}
+\[
+    \mathcal{L}_{\mathrm{motion}}
+    =
+    \frac{1}{|\Omega|}
+    \sum_{i\in\Omega}
+    \rho(\hat{\vect d}_i - \vect d_i^\star),
+\]
+với $\rho$ là robust L1/Charbonnier loss.
+
+\paragraph{Blur flow loss.}
+Do mơ hồ dấu của blur direction:
+\[
+    \mathcal{L}_{\mathrm{blur}}
+    =
+    \frac{1}{|\Omega|}
+    \sum_{i\in\Omega}
+    \min\left(
+      \rho(\hat{\vect b}_i - \vect b_i^\star),
+      \rho(\hat{\vect b}_i + \vect b_i^\star)
+    \right).
+\]
+
+\paragraph{Physics consistency.}
+\[
+    \mathcal{L}_{\mathrm{physics}}
+    =
+    \frac{1}{|\Omega|}
+    \sum_{i\in\Omega}
+    w_i
+    \left\|
+      \hat{\vect b}_i - \alphagt \hat{\vect d}_i
+    \right\|_1.
+\]
+
+\section{Điểm mới}
+
+Đề xuất không claim là bài đầu tiên ước lượng shutter angle. Điểm mới nên được phát biểu thận trọng như sau:
+
+\begin{enumerate}[leftmargin=1.5em]
+    \item \textbf{Tách hai tín hiệu nhưng ràng buộc bằng vật lý.}
+    Thay vì fusion hai scalar tự do, mô hình học hai trường vector dày đặc và dùng lớp weighted least-squares không học tham số để suy ra exposure fraction.
+
+    \item \textbf{Giữ blur và temporal texture ở đúng vai trò quan sát.}
+    Blur branch đo chuyển động trong thời gian phơi sáng; temporal branch đo chuyển động trong frame interval. Tỉ lệ của chúng là shutter information.
+
+    \item \textbf{Lightweight real-time design.}
+    Mục tiêu không chỉ là accuracy mà còn là latency thấp, phù hợp video inference. Đây là hướng khác với pipeline dựa hoàn toàn vào optical flow/backbone nặng.
+
+    \item \textbf{Uncertainty-aware estimation.}
+    Context quality branch cho phép mô hình tự giảm trọng số vùng không đáng tin, đồng thời tạo cơ sở báo cáo confidence calibration/risk--coverage.
+
+    \item \textbf{Dataset-compatible supervision.}
+    Mô hình có thể train bằng public optical-flow hoặc high-FPS dataset qua renderer sinh blur có kiểm soát, rồi evaluate trên real exposure dataset.
+\end{enumerate}
+
+\section{Tại sao cần mô hình này?}
+
+\paragraph{Blur-only là không đủ.}
+Một frame mờ không thể phân biệt ``chuyển động nhanh + exposure ngắn'' với ``chuyển động chậm + exposure dài''. Đây là ambiguity cơ bản, không phải chỉ do model chưa đủ lớn.
+
+\paragraph{Temporal-only là không đủ.}
+Temporal texture cho biết vật thể đi được bao nhiêu pixel giữa hai frame, nhưng không cho biết sensor đã tích phân ánh sáng trong bao lâu của frame interval. Vì vậy temporal branch cần blur branch để biết phần nào của chuyển động đã bị tích phân thành motion blur.
+
+\paragraph{Physics layer giúp giảm shortcut.}
+Nếu để network tự học scalar $\alpha$ trực tiếp, nó có thể dựa vào bias của dataset như contrast, synthetic artifact hoặc camera motion pattern. Lớp vật lý ép mô hình giải thích prediction thông qua hai đại lượng quan sát được: $\vect b$ và $\vect d$.
+
+\paragraph{Exposure fraction hữu dụng hơn speed trong điều kiện dataset hiện tại.}
+Speed metric cần nhiều thông tin không có trong public dataset. Exposure fraction vẫn có ý nghĩa thực tế cho video enhancement, deblurring, frame interpolation, camera forensics và restoration pipeline, đồng thời có benchmark công khai để so sánh.
+
+\section{Dataset và protocol thực nghiệm}
+
+\begin{table}[h]
+\centering
+\small
+\begin{tabular}{p{0.20\linewidth}p{0.30\linewidth}p{0.38\linewidth}}
+\toprule
+\textbf{Dataset} & \textbf{Vai trò} & \textbf{Lý do phù hợp} \\
+\midrule
+MPI Sintel / Spring & Train/validation synthetic blur & Có frame sequence và optical-flow GT; có thể sinh blur với $\alpha$ biết trước. \\
+Adobe240 / GoPro high-FPS & Domain phụ nếu kịp & Có high-FPS frame để mô phỏng tích phân nhiều sub-frame, giúp giảm synthetic gap. \\
+Beam-Splitter Dataset & Real benchmark & Có shutter/exposure label để đánh giá exposure fraction trên video thật. \\
+\bottomrule
+\end{tabular}
+\caption{Dataset đề xuất. Tất cả split phải scene/video-disjoint để tránh leakage.}
+\end{table}
+
+\paragraph{Synthetic blur generation.}
+Từ frame sắc nét và optical flow, renderer tích phân các frame được warp trong linear-light space:
+\[
+    B_t = \frac{1}{K}\sum_{k=1}^{K}
+    I_t\!\left(x + \tau_k \alphagt \vect d(x)\right),
+    \qquad
+    \tau_k \in [-1/2, 1/2].
+\]
+Cách này tạo được ground truth $\alphagt$, $\vect d^\star$ và $\vect b^\star=\alphagt\vect d^\star$ mà không cần speed GT.
+
+\paragraph{Real-video evaluation.}
+Với video có metadata exposure time và FPS:
+\[
+    \alphagt = t_{\mathrm{exposure}}\cdot \mathrm{FPS}.
+\]
+Nếu dùng Beam-Splitter Dataset, cần giữ protocol cố định, không chọn clip dựa trên kết quả model.
+
+\section{Baseline cần so sánh}
+
+\begin{enumerate}[leftmargin=1.5em]
+    \item Constant training-set median $\alpha$.
+    \item Direct clip-to-$\alpha$ regression với cùng encoder budget.
+    \item Blur-only regression.
+    \item Temporal-only regression.
+    \item Pipeline cổ điển/previous work: optical flow + linear blur ratio, ví dụ hướng Korčák--Matas.
+    \item Full BT-ShutterNet: blur branch + temporal branch + context quality + physics layer.
+\end{enumerate}
+
+Các baseline single-cue rất quan trọng. Nếu full model không vượt blur-only hoặc temporal-only, claim ``cần cả blur và temporal texture'' sẽ không đứng vững.
+
+\section{Metric báo cáo}
+
+Primary metrics:
+\[
+    \mathrm{MAE}_\alpha =
+    \frac{1}{N}\sum_{n=1}^N |\hat{\alpha}_n - \alpha_n^\star|,
+    \qquad
+    \mathrm{RMSE}_\alpha =
+    \sqrt{
+      \frac{1}{N}\sum_{n=1}^N
+      (\hat{\alpha}_n - \alpha_n^\star)^2
+    }.
+\]
+
+Diagnostic metrics:
+\begin{itemize}[leftmargin=1.5em]
+    \item motion endpoint error cho $\hat{\vect d}$;
+    \item sign-invariant blur endpoint error cho $\hat{\vect b}$;
+    \item per-alpha-bin MAE: $\alpha<0.1$, $0.1\le\alpha<0.3$, $\alpha\ge0.3$;
+    \item risk--coverage curve theo confidence;
+    \item latency, FPS, số tham số và peak memory.
+\end{itemize}
+
+\section{Rủi ro và cách giảm}
+
+\begin{table}[h]
+\centering
+\small
+\begin{tabular}{p{0.28\linewidth}p{0.58\linewidth}}
+\toprule
+\textbf{Rủi ro} & \textbf{Cách xử lý} \\
+\midrule
+Synthetic-to-real gap & Dùng linear-light renderer, augment noise/saturation, thêm high-FPS domain nếu kịp, báo cáo zero-shot riêng với fine-tune/adaptation nếu có. \\
+Motion quá nhỏ & Dùng ngưỡng min-motion và confidence; báo cáo failure case thay vì ép model đo khi tín hiệu không đủ. \\
+Blur quá mạnh hoặc saturation & Context quality giảm trọng số vùng hỏng; phân tích per-bin và visualisation. \\
+Non-linear motion / rolling shutter & Nêu rõ assumption local constant velocity; không claim hoạt động hoàn hảo cho mọi camera. \\
+Shortcut học artifact synthetic & So sánh direct regression, blur-only, temporal-only; dùng scene-disjoint split và real benchmark. \\
+Claim quá mức & Phân biệt toy diagnostic, synthetic validation và real benchmark; công bố seed/split/config. \\
+\bottomrule
+\end{tabular}
+\caption{Các rủi ro chính của hướng nghiên cứu và mitigation tương ứng.}
+\end{table}
+
+\section{Lộ trình 15 ngày}
+
+\begin{enumerate}[leftmargin=1.5em]
+    \item \textbf{Ngày 1--3:} chạy train scene-disjoint trên Sintel/Spring; kiểm tra renderer, loss và sanity visualization của $\hat{\vect b},\hat{\vect d},w$.
+    \item \textbf{Ngày 4--6:} chạy baseline direct, blur-only, temporal-only với cùng split và ít nhất ba seed nếu thời gian/GPU cho phép.
+    \item \textbf{Ngày 7--9:} evaluate zero-shot trên Beam-Splitter Dataset; tạo per-alpha-bin table và risk--coverage curve.
+    \item \textbf{Ngày 10--11:} reproduce hoặc gọi implementation baseline Korčák--Matas; nếu không kịp, báo cáo published number một cách thận trọng và nói rõ protocol khác biệt.
+    \item \textbf{Ngày 12--13:} viết phần Method, Experiment, Limitation; chọn qualitative examples thành công/thất bại.
+    \item \textbf{Ngày 14:} freeze bảng kết quả, chạy lại test, kiểm tra leakage và seed/config hash.
+    \item \textbf{Ngày 15:} polish paper, ethics/integrity checklist, supplementary và code release note.
+\end{enumerate}
+
+\section{Kết luận}
+
+Hướng speed ban đầu có trực giác hấp dẫn nhưng thiếu điều kiện quan sát để trở thành bài toán supervised sạch trên public dataset. BT-ShutterNet chuyển mục tiêu sang exposure fraction, một đại lượng vừa giữ được lõi blur--temporal texture, vừa có định nghĩa vật lý rõ và có benchmark để so sánh. Novelty nên nằm ở cách ràng buộc hai nhánh bằng physics layer, uncertainty-aware dense estimation và thiết kế nhẹ cho inference thời gian thực. Nếu thực nghiệm chứng minh full model vượt direct/blur-only/temporal-only và tiệm cận hoặc vượt previous work trên real benchmark, đây là một story đủ sạch và có cơ hội cho ACCV.
+
+\section*{Ghi chú liêm chính}
+
+\begin{itemize}[leftmargin=1.5em]
+    \item Không dùng toy diagnostic làm benchmark result.
+    \item Không tuning trên test clip của real benchmark.
+    \item Không claim ``first'' vì đã có prior work về shutter-angle estimation.
+    \item Luôn tách rõ measured result, planning threshold và speculation.
+    \item Nếu kết quả real benchmark không đạt, nên chuyển claim sang lightweight/uncertainty analysis hoặc báo cáo negative finding trung thực.
+\end{itemize}
+
+\begin{thebibliography}{9}
+
+\bibitem{korcak2023shutter}
+M. Korčák and J. Matas.
+\newblock Video Shutter Angle Estimation using Optical Flow and Linear Blur.
+\newblock arXiv preprint, 2023.
+
+\bibitem{raft2020}
+Z. Teed and J. Deng.
+\newblock RAFT: Recurrent All-Pairs Field Transforms for Optical Flow.
+\newblock ECCV, 2020.
+
+\bibitem{sintel}
+D. J. Butler, J. Wulff, G. B. Stanley, and M. J. Black.
+\newblock A Naturalistic Open Source Movie for Optical Flow Evaluation.
+\newblock ECCV, 2012.
+
+\bibitem{gong2017motionblur}
+D. Gong et al.
+\newblock From Motion Blur to Motion Flow: a Deep Learning Solution for Removing Heterogeneous Motion Blur.
+\newblock CVPR, 2017.
+
+\end{thebibliography}
+
+\end{document}
