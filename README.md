@@ -100,6 +100,26 @@ research result.
 
 ## Training
 
+Before training, inspect a few generated samples:
+
+```powershell
+python scripts/visualize_data.py ^
+  --config configs/default.yaml ^
+  --dataset exposure_flow ^
+  --count 8 ^
+  --output-dir runs/visualize_data/sintel
+```
+
+If training feels slow, profile the input pipeline before changing the model:
+
+```powershell
+python scripts/profile_input_pipeline.py ^
+  --config configs/default.yaml ^
+  --data-root data/sintel ^
+  --samples 64 ^
+  --workers 0,2,4
+```
+
 ```powershell
 python scripts/train.py ^
   --config configs/default.yaml ^

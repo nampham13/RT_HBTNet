@@ -124,6 +124,7 @@ class ExposureFlowDataset(Dataset):
         self.stride = int(dataset_cfg.get("stride", 1))
         self.samples_per_clip = int(dataset_cfg.get("samples_per_clip", 2))
         self.integration_samples = int(dataset_cfg.get("integration_samples", 9))
+        self.render_at_target_resolution = bool(dataset_cfg.get("render_at_target_resolution", True))
         self.gamma = float(dataset_cfg.get("gamma", 2.2))
         self.alpha_min = float(dataset_cfg.get("alpha_min", 0.02))
         self.alpha_max = float(dataset_cfg.get("alpha_max", 0.95))
@@ -155,13 +156,30 @@ class ExposureFlowDataset(Dataset):
 
         frames: list[np.ndarray] = []
         flows: list[np.ndarray] = []
+        valid_masks: list[np.ndarray] = []
         for frame_path, flow_path in zip(record["frame_paths"], record["flow_paths"]):
             image = cv2.imread(str(frame_path), cv2.IMREAD_COLOR)
             if image is None:
                 raise FileNotFoundError(f"Could not read frame: {frame_path}")
             flow = read_middlebury_flo(flow_path)
-            valid = np.isfinite(flow).all(axis=2)
+            valid = (
+                np.isfinite(flow).all(axis=2)
+                & (np.linalg.norm(flow, axis=2) <= self.max_flow)
+            )
             clean_flow = np.where(valid[..., None], flow, 0.0).astype(np.float32)
+            if self.render_at_target_resolution:
+                image = cv2.resize(
+                    image,
+                    (self.target_width, self.target_height),
+                    interpolation=cv2.INTER_AREA,
+                )
+                clean_flow = resize_flow(clean_flow, self.target_width, self.target_height)
+                valid = cv2.resize(
+                    valid.astype(np.uint8),
+                    (self.target_width, self.target_height),
+                    interpolation=cv2.INTER_NEAREST,
+                ).astype(bool)
+                clean_flow = np.where(valid[..., None], clean_flow, 0.0).astype(np.float32)
             frames.append(synthesize_motion_blur(
                 image,
                 clean_flow,
@@ -170,6 +188,7 @@ class ExposureFlowDataset(Dataset):
                 gamma=self.gamma,
             ))
             flows.append(clean_flow)
+            valid_masks.append(valid)
 
         x_seq = torch.from_numpy(
             stack_sequence([preprocess_roi(frame, self.config) for frame in frames])
@@ -177,16 +196,17 @@ class ExposureFlowDataset(Dataset):
 
         center = self.sequence_length // 2
         center_flow_original = flows[center]
-        valid_original = (
-            np.isfinite(center_flow_original).all(axis=2)
-            & (np.linalg.norm(center_flow_original, axis=2) <= self.max_flow)
-        )
-        center_flow = resize_flow(center_flow_original, self.target_width, self.target_height)
-        valid_mask = cv2.resize(
-            valid_original.astype(np.uint8),
-            (self.target_width, self.target_height),
-            interpolation=cv2.INTER_NEAREST,
-        ).astype(np.float32)
+        valid_original = valid_masks[center]
+        if self.render_at_target_resolution:
+            center_flow = center_flow_original.astype(np.float32)
+            valid_mask = valid_original.astype(np.float32)
+        else:
+            center_flow = resize_flow(center_flow_original, self.target_width, self.target_height)
+            valid_mask = cv2.resize(
+                valid_original.astype(np.uint8),
+                (self.target_width, self.target_height),
+                interpolation=cv2.INTER_NEAREST,
+            ).astype(np.float32)
 
         motion_flow = torch.from_numpy(center_flow.transpose(2, 0, 1)).float()
         blur_flow = motion_flow * float(alpha)

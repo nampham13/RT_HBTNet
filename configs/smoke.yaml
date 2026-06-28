@@ -18,6 +18,7 @@ data:
       stride: 2
       samples_per_clip: 1
       integration_samples: 5
+      render_at_target_resolution: true
       alpha_values: [0.1, 0.3, 0.6, 0.9]
       max_flow: 100.0
 

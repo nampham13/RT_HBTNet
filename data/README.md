@@ -56,6 +56,30 @@ python scripts/train.py --config configs/default.yaml --data-root path/to/sintel
 Loader sẽ tự sinh blur với nhiều giá trị exposure fraction `alpha`, nên không
 cần label speed.
 
+Để train nhanh hơn, loader mặc định render blur trực tiếp ở resolution train
+(`render_at_target_resolution: true`). Đây là resolution mà model thật sự nhìn
+thấy, nên target `motion_flow` và `blur_flow` vẫn khớp với input.
+
+Visualize vài sample trước khi train:
+
+```powershell
+python scripts/visualize_data.py ^
+  --config configs/default.yaml ^
+  --dataset exposure_flow ^
+  --count 8 ^
+  --output-dir runs/visualize_data/sintel
+```
+
+Profile tốc độ ingest nếu train chậm:
+
+```powershell
+python scripts/profile_input_pipeline.py ^
+  --config configs/default.yaml ^
+  --data-root data/sintel ^
+  --samples 64 ^
+  --workers 0,2,4
+```
+
 ## 2. Real benchmark: `data/bsd`
 
 Với Beam-Splitter Dataset hoặc video thật có exposure time:
@@ -97,6 +121,18 @@ python scripts/evaluate.py ^
   --output runs/exposure/bsd_report.json
 ```
 
+Visualize video samples và metadata alpha:
+
+```powershell
+python scripts/visualize_data.py ^
+  --config configs/default.yaml ^
+  --dataset exposure_video ^
+  --data-root data/bsd ^
+  --manifest data/bsd/manifest.csv ^
+  --count 8 ^
+  --output-dir runs/visualize_data/bsd
+```
+
 ## 3. Smoke test: `data/toy_exposure`
 
 Tạo toy data:
@@ -109,6 +145,16 @@ Chạy thử:
 
 ```powershell
 python scripts/train.py --config configs/smoke.yaml --epochs 1 --num-workers 0
+```
+
+Visualize toy data:
+
+```powershell
+python scripts/visualize_data.py ^
+  --config configs/smoke.yaml ^
+  --dataset exposure_flow ^
+  --count 4 ^
+  --output-dir runs/visualize_data/toy
 ```
 
 Toy data chỉ để xem pipeline có chạy không. Không dùng làm benchmark result.

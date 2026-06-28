@@ -47,6 +47,23 @@ pipeline's sensitivity to scene diversity.
 
 None of these toy numbers may be used as a paper result.
 
+## Input-pipeline profiling
+
+Measured on June 25, 2026 with `data/sintel`, batch size 8, 64 profiled
+samples and no model training:
+
+- original full-resolution blur rendering: about 601.6 ms/sample and
+  4790.2 ms/batch with `num_workers=0`;
+- target-resolution blur rendering: about 166.7 ms/sample and 1355.4 ms/batch
+  with `num_workers=0`;
+- target-resolution rendering with Windows multiprocessing was slower in this
+  run: 2054.7 ms/batch with two workers and 3066.2 ms/batch with four workers;
+- random-input model forward on CPU was about 47.6 ms/batch.
+
+Conclusion: current training speed is primarily input-pipeline/rendering bound,
+not model-forward bound. The default config now uses target-resolution blur
+rendering and `num_workers=0` for the local Windows setup.
+
 ## Required before submission
 
 1. Train on real benchmark-scale flow data such as Sintel or Spring.

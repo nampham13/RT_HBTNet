@@ -1,5 +1,5 @@
 project:
-  name: "BT-ShutterNet"
+  name: "BT-ShutterNet-Kaggle"
   seed: 42
   device: "auto"
 
@@ -13,7 +13,8 @@ data:
   normalize: true
   datasets:
     exposure_flow:
-      root: "data/sintel"
+      # Override this with --data-root if your Kaggle dataset slug differs.
+      root: "/kaggle/input/mpi-sintel-dataset"
       split: "training"
       image_subdir: "final"
       flow_subdir: "flow"
@@ -53,7 +54,8 @@ training:
   epochs: 30
   lr: 0.0002
   weight_decay: 0.0001
-  num_workers: 0
+  # Kaggle is Linux; try 2 or 4 workers. Run profile_input_pipeline.py first.
+  num_workers: 2
   val_fraction: 0.2
   loss:
     alpha_weight: 1.0
@@ -64,7 +66,7 @@ training:
     direction_weight: 0.05
 
 inference:
-  show_window: true
+  show_window: false
   ema_alpha: 0.2
   min_confidence: 0.05
 

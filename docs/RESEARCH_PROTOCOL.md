@@ -98,6 +98,33 @@ failure modes at very short and very long exposures.
 The constant baseline must be computed on the training partition and passed
 unchanged to evaluation. Computing it from test labels is leakage.
 
+## Data visualization checks
+
+Run dataset visualization before every serious training/evaluation run:
+
+```powershell
+python scripts/visualize_data.py --config configs/default.yaml --dataset exposure_flow --count 16
+```
+
+For synthetic flow data, inspect:
+
+- temporal frame order and ROI crop;
+- motion-flow direction and magnitude;
+- blur-flow direction and magnitude;
+- local alpha map implied by `blur_flow / motion_flow`;
+- valid-mask coverage;
+- `summary.csv` rows with tiny motion, low valid ratio or suspicious alpha.
+
+For real-video manifests, inspect:
+
+- frame sampling range;
+- FPS and exposure-time conversion into alpha;
+- scene/video identifiers used for disjoint splitting;
+- clips with saturation, low texture or rolling-shutter artifacts.
+
+Do not proceed to benchmark reporting if visualization reveals broken frame
+order, wrong flow orientation, invalid alpha metadata or split leakage.
+
 ## Go/no-go criteria
 
 - Synthetic validation MAE above 0.020: inspect renderer, supervision and
