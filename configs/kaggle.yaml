@@ -14,7 +14,7 @@ data:
   datasets:
     exposure_flow:
       # Override this with --data-root if your Kaggle dataset slug differs.
-      root: "/kaggle/input/mpi-sintel-dataset"
+      root: "/kaggle/input/MPI Sintel Dataset"
       split: "training"
       image_subdir: "final"
       flow_subdir: "flow"
